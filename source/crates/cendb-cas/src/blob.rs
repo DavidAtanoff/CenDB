@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use cendb_core::{HexError, HexResult};
+use cendb_core::{CenError, CenResult};
 use cendb_index::ArtTree;
 
 use crate::hash::Hash;
@@ -94,7 +94,7 @@ pub struct BlobStore {
 impl BlobStore {
     /// Open (or create) a blob store at `dir`. The directory is created if
     /// it doesn't exist. Existing blobs are indexed on open.
-    pub fn open(dir: impl AsRef<Path>) -> HexResult<Self> {
+    pub fn open(dir: impl AsRef<Path>) -> CenResult<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
         let mut store = Self {
@@ -112,7 +112,7 @@ impl BlobStore {
         self
     }
 
-    fn scan_existing(&mut self) -> HexResult<()> {
+    fn scan_existing(&mut self) -> CenResult<()> {
         // Load the index from the index file if it exists.
         let index_path = self.dir.join("_index.cdb");
         if index_path.exists() {
@@ -148,15 +148,15 @@ impl BlobStore {
     ///
     /// Returns the `BlobId` (which is the content hash) and whether the
     /// blob was newly created (`true`) or deduplicated (`false`).
-    pub fn put(&mut self, data: &[u8]) -> HexResult<(BlobId, bool)> {
+    pub fn put(&mut self, data: &[u8]) -> CenResult<(BlobId, bool)> {
         let hash = Hash::of(data);
 
         // Check for existing (deduplication fast path).
         if let Some(existing) = self.index.get(hash.as_slice()) {
             // Already exists — increment refcount.
-            let mut meta = existing;
+            let mut meta = existing.clone();
             meta.refcount += 1;
-            self.index.insert(hash.as_slice(), meta.clone());
+            self.index.insert(hash.as_slice(), meta);
             self.persist_index()?;
             return Ok((hash, false));
         }
@@ -166,7 +166,7 @@ impl BlobStore {
             CompressionKind::None => (data.to_vec(), CompressionKind::None),
             CompressionKind::Zstd => {
                 let compressed = zstd::encode_all(data, 3)
-                    .map_err(|e| HexError::io(format!("zstd compress: {}", e)))?;
+                    .map_err(|e| CenError::io(format!("zstd compress: {}", e)))?;
                 // Only use compressed version if it's actually smaller.
                 if compressed.len() < data.len() {
                     (compressed, CompressionKind::Zstd)
@@ -203,18 +203,18 @@ impl BlobStore {
     }
 
     /// Retrieve a blob's content by hash. Decompresses if needed.
-    pub fn get(&self, hash: &Hash) -> HexResult<Vec<u8>> {
+    pub fn get(&self, hash: &Hash) -> CenResult<Vec<u8>> {
         let meta = self
             .index
             .get(hash.as_slice())
-            .ok_or_else(|| HexError::not_found(format!("blob {} not found", hash)))?;
+            .ok_or_else(|| CenError::not_found(format!("blob {} not found", hash)))?;
         let blob_path = self.blob_path(hash);
         let stored = fs::read(&blob_path)?;
         let data = match meta.compression {
             CompressionKind::None => stored,
             CompressionKind::Zstd => {
                 zstd::decode_all(&stored[..])
-                    .map_err(|e| HexError::io(format!("zstd decompress: {}", e)))?
+                    .map_err(|e| CenError::io(format!("zstd decompress: {}", e)))?
             }
         };
         Ok(data)
@@ -222,7 +222,7 @@ impl BlobStore {
 
     /// Get metadata for a blob without reading its content.
     pub fn meta(&self, hash: &Hash) -> Option<BlobMeta> {
-        self.index.get(hash.as_slice())
+        self.index.get(hash.as_slice()).cloned()
     }
 
     /// Check whether a blob exists (without reading it).
@@ -232,11 +232,11 @@ impl BlobStore {
 
     /// Decrement the reference count. If it hits zero, the blob is deleted
     /// from disk (garbage collection).
-    pub fn release(&mut self, hash: &Hash) -> HexResult<bool> {
+    pub fn release(&mut self, hash: &Hash) -> CenResult<bool> {
         let meta = self
             .index
             .get(hash.as_slice())
-            .ok_or_else(|| HexError::not_found(format!("blob {} not found", hash)))?;
+            .ok_or_else(|| CenError::not_found(format!("blob {} not found", hash)))?;
         if meta.refcount <= 1 {
             // Delete the blob.
             let blob_path = self.blob_path(hash);
@@ -251,7 +251,7 @@ impl BlobStore {
             self.persist_index()?;
             Ok(true) // deleted
         } else {
-            let mut updated = meta;
+            let mut updated = meta.clone();
             updated.refcount -= 1;
             self.index.insert(hash.as_slice(), updated);
             self.persist_index()?;
@@ -261,12 +261,12 @@ impl BlobStore {
 
     /// Increment the reference count (e.g., when another table references
     /// an existing blob).
-    pub fn retain(&mut self, hash: &Hash) -> HexResult<()> {
+    pub fn retain(&mut self, hash: &Hash) -> CenResult<()> {
         let meta = self
             .index
             .get(hash.as_slice())
-            .ok_or_else(|| HexError::not_found(format!("blob {} not found", hash)))?;
-        let mut updated = meta;
+            .ok_or_else(|| CenError::not_found(format!("blob {} not found", hash)))?;
+        let mut updated = meta.clone();
         updated.refcount += 1;
         self.index.insert(hash.as_slice(), updated);
         self.persist_index()
@@ -333,9 +333,9 @@ impl BlobStore {
         out
     }
 
-    fn deserialize_meta(bytes: &[u8]) -> HexResult<BlobMeta> {
+    fn deserialize_meta(bytes: &[u8]) -> CenResult<BlobMeta> {
         if bytes.len() < 32 + 8 + 8 + 1 + 8 {
-            return Err(HexError::corrupt("blob meta too short"));
+            return Err(CenError::corrupt("blob meta too short"));
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&bytes[..32]);
@@ -358,7 +358,7 @@ impl BlobStore {
         })
     }
 
-    fn persist_index(&self) -> HexResult<()> {
+    fn persist_index(&self) -> CenResult<()> {
         let index_path = self.dir.join("_index.cdb");
         let mut out = Vec::new();
         for (key, meta) in self.index.iter() {
@@ -369,7 +369,7 @@ impl BlobStore {
         Ok(())
     }
 
-    fn load_index(&mut self, bytes: &[u8]) -> HexResult<()> {
+    fn load_index(&mut self, bytes: &[u8]) -> CenResult<()> {
         let record_size = 32 + 32 + 8 + 8 + 1 + 8; // key + meta
         let mut cursor = 0;
         while cursor + record_size <= bytes.len() {

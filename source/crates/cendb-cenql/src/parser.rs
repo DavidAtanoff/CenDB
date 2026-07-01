@@ -69,10 +69,10 @@ impl Parser {
             self.advance(); // consume `|`
             stages.push(self.parse_stage()?);
         }
-        // Expect EOF.
-        if self.peek_kind() != Some(TokenKind::Eof) {
-            return Err(self.unexpected("end of pipeline"));
-        }
+        // Don't enforce EOF here — the caller (parse_top_level or
+        // parse_statement) may need to check for set operations after
+        // the pipeline. If called directly via `parse()`, the caller
+        // expects EOF, so we check there.
         Ok(CenqlPipeline::new(stages))
     }
 
@@ -80,11 +80,17 @@ impl Parser {
         self.expect(TokenKind::From)?;
         let mut name = self.expect_ident()?;
         // Allow two-word source names like `graph social` (used by the
-        // graph model). We consume a second identifier if it follows.
+        // graph model). We consume a second identifier if it follows,
+        // UNLESS it's a set-operation keyword (union/intersect/except).
         if self.peek_kind() == Some(TokenKind::Ident) {
-            let second = self.advance().text.clone();
-            name.push(' ');
-            name.push_str(&second);
+            if let Some(tok) = self.peek_token() {
+                let lower = tok.text.to_lowercase();
+                if lower != "union" && lower != "intersect" && lower != "except" {
+                    let second = self.advance().text.clone();
+                    name.push(' ');
+                    name.push_str(&second);
+                }
+            }
         }
         Ok(CenqlStage::From { name })
     }
@@ -527,6 +533,11 @@ impl Parser {
         self.tokens.get(self.pos).map(|t| t.kind)
     }
 
+    /// Peek at the current token (returns a reference to the full Token).
+    fn peek_token(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
     fn advance(&mut self) -> &Token {
         let t = &self.tokens[self.pos];
         if self.pos < self.tokens.len() - 1 {
@@ -620,7 +631,364 @@ impl Parser {
 
 /// Convenience: parse a CenQL source string into a pipeline.
 pub fn parse(src: &str) -> ParseResult<CenqlPipeline> {
-    Parser::new(src)?.parse_pipeline()
+    let mut parser = Parser::new(src)?;
+    let pipeline = parser.parse_pipeline()?;
+    // Enforce EOF for the convenience function.
+    if parser.peek_kind() != Some(TokenKind::Eof) {
+        return Err(parser.unexpected("end of pipeline"));
+    }
+    Ok(pipeline)
+}
+
+/// Parse a CenQL source string into a top-level statement (query, DDL,
+/// DML, or transaction control).
+pub fn parse_statement(src: &str) -> ParseResult<CenqlStatement> {
+    let mut parser = Parser::new(src)?;
+    parser.parse_top_level()
+}
+
+impl Parser {
+    /// Parse a top-level CenQL statement.
+    pub fn parse_top_level(&mut self) -> ParseResult<CenqlStatement> {
+        // Peek at the first token to determine statement type.
+        let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+
+        match tok.kind {
+            TokenKind::Ident => {
+                let kw = tok.text.to_lowercase();
+                match kw.as_str() {
+                    "create" => self.parse_create(),
+                    "drop" => self.parse_drop(),
+                    "insert" => self.parse_insert(),
+                    "update" => self.parse_update(),
+                    "delete" => self.parse_delete_stmt(),
+                    "upsert" => self.parse_upsert(),
+                    "begin" => {
+                        self.advance();
+                        Ok(CenqlStatement::Begin)
+                    }
+                    "commit" => {
+                        self.advance();
+                        Ok(CenqlStatement::Commit)
+                    }
+                    "rollback" => {
+                        self.advance();
+                        Ok(CenqlStatement::Rollback)
+                    }
+                    "with" => self.parse_cte(),
+                    _ => {
+                        // Unknown ident — try as a query pipeline.
+                        let pipeline = self.parse_pipeline()?;
+                        // Check for set operations (union/intersect/except).
+                        let stmt = self.check_set_operations(pipeline)?;
+                        Ok(stmt)
+                    }
+                }
+            }
+            TokenKind::Distinct => {
+                self.advance();
+                let pipeline = self.parse_pipeline()?;
+                Ok(CenqlStatement::Distinct {
+                    pipeline: Box::new(pipeline),
+                })
+            }
+            TokenKind::From => {
+                // A query pipeline starting with `from`.
+                let pipeline = self.parse_pipeline()?;
+                // Check for set operations (union/intersect/except).
+                let stmt = self.check_set_operations(pipeline)?;
+                Ok(stmt)
+            }
+            _ => {
+                // Parse as a query pipeline.
+                let pipeline = self.parse_pipeline()?;
+                Ok(CenqlStatement::Query(pipeline))
+            }
+        }
+    }
+
+    /// Check if the next token is a set operation (union/intersect/except).
+    fn check_set_operations(&mut self, left: CenqlPipeline) -> ParseResult<CenqlStatement> {
+        if let Some(next_tok) = self.peek_token() {
+            if next_tok.kind == TokenKind::Ident {
+                let next_kw = next_tok.text.to_lowercase();
+                if next_kw == "union" {
+                    self.advance();
+                    let all = if let Some(t) = self.peek_token() {
+                        t.kind == TokenKind::Ident && t.text.to_lowercase() == "all"
+                    } else { false };
+                    if all { self.advance(); }
+                    let right = self.parse_pipeline()?;
+                    return Ok(CenqlStatement::Union {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        all,
+                    });
+                }
+                if next_kw == "intersect" {
+                    self.advance();
+                    let right = self.parse_pipeline()?;
+                    return Ok(CenqlStatement::Intersect {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    });
+                }
+                if next_kw == "except" {
+                    self.advance();
+                    let right = self.parse_pipeline()?;
+                    return Ok(CenqlStatement::Except {
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    });
+                }
+            }
+        }
+        Ok(CenqlStatement::Query(left))
+    }
+
+    /// Parse a CREATE statement (table, index, or view).
+    fn parse_create(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "create"
+        let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+        if tok.kind == TokenKind::Ident {
+            let kw = tok.text.to_lowercase(); match kw.as_str() {
+                "table" => self.parse_create_table(),
+                "index" => self.parse_create_index(),
+                "view" => self.parse_create_view(),
+                _ => Err(ParseError::Other(format!("expected table/index/view after create, got {}", kw))),
+            }
+        } else {
+            Err(ParseError::Other("expected table/index/view after create".into()))
+        }
+    }
+
+    fn parse_create_table(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "table"
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut columns = Vec::new();
+        let mut primary_key = None;
+        loop {
+            let col_name = self.expect_ident()?;
+            // Check for "primary_key" special column.
+            if col_name.to_lowercase() == "primary_key" {
+                self.expect(TokenKind::Colon)?;
+                primary_key = Some(self.expect_ident()?);
+            } else {
+                self.expect(TokenKind::Colon)?;
+                let type_tok = self.expect_ident()?;
+                let data_type = match type_tok.to_lowercase().as_str() {
+                    "i64" | "int" | "integer" => ColumnType::I64,
+                    "f64" | "float" | "double" => ColumnType::F64,
+                    "str" | "string" | "text" => ColumnType::Str,
+                    "bool" | "boolean" => ColumnType::Bool,
+                    "bytes" | "blob" => ColumnType::Bytes,
+                    "timestamp" | "time" => ColumnType::Timestamp,
+                    "json" => ColumnType::Json,
+                    _ => ColumnType::Str, // default to string
+                };
+                // Check for "not null".
+                let nullable = if let Some(t) = self.peek_token() {
+                    if t.kind == TokenKind::Not {
+                        self.advance();
+                        // Expect "null" — but "null" might be tokenized as
+                        // an Ident since it's not in the keyword list.
+                        if let Some(t2) = self.peek_token() {
+                            if t2.kind == TokenKind::Ident && t2.text.to_lowercase() == "null" {
+                                self.advance();
+                                false
+                            } else { true }
+                        } else { true }
+                    } else { true }
+                } else { true };
+                columns.push(ColumnDef { name: col_name, data_type, nullable });
+            }
+            // Check for comma or close brace.
+            let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+            match tok.kind {
+                TokenKind::Comma => { self.advance(); }
+                TokenKind::RBrace => { self.advance(); break; }
+                _ => break,
+            }
+        }
+        Ok(CenqlStatement::CreateTable { name, columns, primary_key })
+    }
+
+    fn parse_create_index(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "index"
+        let name = self.expect_ident()?;
+        // Expect "on" — this is a keyword, so we expect TokenKind::On.
+        self.expect(TokenKind::On)?;
+        let table = self.expect_ident()?;
+        self.expect(TokenKind::LParen)?;
+        let column = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(CenqlStatement::CreateIndex { name, table, column })
+    }
+
+    fn parse_create_view(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "view"
+        let name = self.expect_ident()?;
+        // Expect "as"
+        let as_tok = self.expect_ident()?;
+        if as_tok.to_lowercase() != "as" {
+            return Err(ParseError::Other(format!("expected 'as' after view name, got {}", as_tok)));
+        }
+        let pipeline = self.parse_pipeline()?;
+        Ok(CenqlStatement::CreateView {
+            name,
+            pipeline: Box::new(pipeline),
+        })
+    }
+
+    /// Parse a DROP statement.
+    fn parse_drop(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "drop"
+        let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+        if tok.kind == TokenKind::Ident {
+            let kw = tok.text.to_lowercase(); match kw.as_str() {
+                "table" => {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    Ok(CenqlStatement::DropTable { name })
+                }
+                "index" => {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    Ok(CenqlStatement::DropIndex { name })
+                }
+                "view" => {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    Ok(CenqlStatement::DropView { name })
+                }
+                _ => Err(ParseError::Other(format!("expected table/index/view after drop, got {}", kw))),
+            }
+        } else {
+            Err(ParseError::Other("expected table/index/view after drop".into()))
+        }
+    }
+
+    /// Parse an INSERT statement.
+    fn parse_insert(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "insert"
+        // Expect "into"
+        let into_tok = self.expect_ident()?;
+        if into_tok.to_lowercase() != "into" {
+            return Err(ParseError::Other(format!("expected 'into' after insert, got {}", into_tok)));
+        }
+        let table = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut values = Vec::new();
+        loop {
+            let col = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let val = self.parse_expr()?;
+            values.push((col, val));
+            let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+            match tok.kind {
+                TokenKind::Comma => { self.advance(); }
+                TokenKind::RBrace => { self.advance(); break; }
+                _ => break,
+            }
+        }
+        Ok(CenqlStatement::Insert { table, values })
+    }
+
+    /// Parse an UPDATE statement.
+    fn parse_update(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "update"
+        let table = self.expect_ident()?;
+        // Expect "set"
+        let set_tok = self.expect_ident()?;
+        if set_tok.to_lowercase() != "set" {
+            return Err(ParseError::Other(format!("expected 'set' after table name, got {}", set_tok)));
+        }
+        let mut assignments = Vec::new();
+        loop {
+            let col = self.expect_ident()?;
+            self.expect(TokenKind::Assign)?;
+            let val = self.parse_expr()?;
+            assignments.push((col, val));
+            let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+            match tok.kind {
+                TokenKind::Comma => { self.advance(); }
+                _ => break,
+            }
+        }
+        // Check for WHERE.
+        let where_clause = if let Some(t) = self.peek_token() {
+            if t.kind == TokenKind::Ident {
+                if t.text.to_lowercase() == "where" {
+                    self.advance();
+                    Some(self.parse_expr()?)
+                } else { None }
+            } else { None }
+        } else { None };
+        Ok(CenqlStatement::Update { table, assignments, where_clause })
+    }
+
+    /// Parse a DELETE statement.
+    fn parse_delete_stmt(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "delete"
+        // Expect "from" — this is a keyword.
+        self.expect(TokenKind::From)?;
+        let table = self.expect_ident()?;
+        // Check for WHERE.
+        let where_clause = if let Some(t) = self.peek_token() {
+            if t.kind == TokenKind::Ident && t.text.to_lowercase() == "where" {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else { None }
+        } else { None };
+        Ok(CenqlStatement::Delete { table, where_clause })
+    }
+
+    /// Parse an UPSERT statement.
+    fn parse_upsert(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "upsert"
+        // Expect "into"
+        let into_tok = self.expect_ident()?;
+        if into_tok.to_lowercase() != "into" {
+            return Err(ParseError::Other(format!("expected 'into' after upsert, got {}", into_tok)));
+        }
+        let table = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut values = Vec::new();
+        loop {
+            let col = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let val = self.parse_expr()?;
+            values.push((col, val));
+            let tok = self.peek_token().ok_or(ParseError::UnexpectedEof)?;
+            match tok.kind {
+                TokenKind::Comma => { self.advance(); }
+                TokenKind::RBrace => { self.advance(); break; }
+                _ => break,
+            }
+        }
+        Ok(CenqlStatement::Upsert { table, values })
+    }
+
+    /// Parse a CTE (WITH ... AS (...) ...).
+    fn parse_cte(&mut self) -> ParseResult<CenqlStatement> {
+        self.advance(); // consume "with"
+        let cte_name = self.expect_ident()?;
+        // Expect "as"
+        let as_tok = self.expect_ident()?;
+        if as_tok.to_lowercase() != "as" {
+            return Err(ParseError::Other(format!("expected 'as' after CTE name, got {}", as_tok)));
+        }
+        self.expect(TokenKind::LParen)?;
+        let cte_pipeline = self.parse_pipeline()?;
+        self.expect(TokenKind::RParen)?;
+        let main_pipeline = self.parse_pipeline()?;
+        Ok(CenqlStatement::WithCte {
+            cte_name,
+            cte_pipeline: Box::new(cte_pipeline),
+            main_pipeline: Box::new(main_pipeline),
+        })
+    }
 }
 
 // ============================================================================
@@ -760,5 +1128,380 @@ mod tests {
         // The displayed form should still parse.
         let p2 = parse(&displayed).unwrap();
         assert_eq!(p.len(), p2.len());
+    }
+
+    // ========================================================================
+    // DDL statement tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_create_table() {
+        let stmt = parse_statement(r#"create table users { id: i64 not null, name: str, email: str not null, primary_key: id }"#).unwrap();
+        match stmt {
+            CenqlStatement::CreateTable { name, columns, primary_key } => {
+                assert_eq!(name, "users");
+                // primary_key is parsed as a special directive, not a column
+                assert_eq!(columns.len(), 3);
+                assert_eq!(columns[0].name, "id");
+                assert_eq!(columns[0].data_type, ColumnType::I64);
+                assert!(!columns[0].nullable);
+                assert_eq!(columns[1].name, "name");
+                assert_eq!(columns[1].data_type, ColumnType::Str);
+                assert!(columns[1].nullable);
+                assert_eq!(columns[2].name, "email");
+                assert!(!columns[2].nullable);
+                assert_eq!(primary_key, Some("id".to_string()));
+            }
+            _ => panic!("expected CreateTable, got {:?}", stmt),
+        }
+    }
+
+    #[test]
+    fn parse_create_table_all_types() {
+        let stmt = parse_statement(r#"create table mixed { a: i64, b: f64, c: str, d: bool, e: bytes, f: timestamp, g: json }"#).unwrap();
+        match stmt {
+            CenqlStatement::CreateTable { columns, .. } => {
+                assert_eq!(columns.len(), 7);
+                assert_eq!(columns[0].data_type, ColumnType::I64);
+                assert_eq!(columns[1].data_type, ColumnType::F64);
+                assert_eq!(columns[2].data_type, ColumnType::Str);
+                assert_eq!(columns[3].data_type, ColumnType::Bool);
+                assert_eq!(columns[4].data_type, ColumnType::Bytes);
+                assert_eq!(columns[5].data_type, ColumnType::Timestamp);
+                assert_eq!(columns[6].data_type, ColumnType::Json);
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
+    fn parse_create_table_no_primary_key() {
+        let stmt = parse_statement(r#"create table logs { level: str, message: str }"#).unwrap();
+        match stmt {
+            CenqlStatement::CreateTable { name, columns, primary_key } => {
+                assert_eq!(name, "logs");
+                assert_eq!(columns.len(), 2);
+                assert_eq!(primary_key, None);
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_table() {
+        let stmt = parse_statement("drop table users").unwrap();
+        match stmt {
+            CenqlStatement::DropTable { name } => assert_eq!(name, "users"),
+            _ => panic!("expected DropTable"),
+        }
+    }
+
+    #[test]
+    fn parse_create_index() {
+        let stmt = parse_statement("create index idx_name on users(name)").unwrap();
+        match stmt {
+            CenqlStatement::CreateIndex { name, table, column } => {
+                assert_eq!(name, "idx_name");
+                assert_eq!(table, "users");
+                assert_eq!(column, "name");
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_index() {
+        let stmt = parse_statement("drop index idx_name").unwrap();
+        match stmt {
+            CenqlStatement::DropIndex { name } => assert_eq!(name, "idx_name"),
+            _ => panic!("expected DropIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_create_view() {
+        let stmt = parse_statement(r#"create view active_users as from users | filter status == "active""#).unwrap();
+        match stmt {
+            CenqlStatement::CreateView { name, pipeline } => {
+                assert_eq!(name, "active_users");
+                assert!(pipeline.len() >= 2);
+            }
+            _ => panic!("expected CreateView"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_view() {
+        let stmt = parse_statement("drop view active_users").unwrap();
+        match stmt {
+            CenqlStatement::DropView { name } => assert_eq!(name, "active_users"),
+            _ => panic!("expected DropView"),
+        }
+    }
+
+    // ========================================================================
+    // DML statement tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_insert() {
+        let stmt = parse_statement(r#"insert into users { id: 42, name: "Alice", email: "alice@example.com" }"#).unwrap();
+        match stmt {
+            CenqlStatement::Insert { table, values } => {
+                assert_eq!(table, "users");
+                assert_eq!(values.len(), 3);
+                assert_eq!(values[0].0, "id");
+                assert_eq!(values[1].0, "name");
+                assert_eq!(values[2].0, "email");
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_with_expressions() {
+        let stmt = parse_statement(r#"insert into products { name: "Widget", price: 9.99, quantity: 100 }"#).unwrap();
+        match stmt {
+            CenqlStatement::Insert { table, values } => {
+                assert_eq!(table, "products");
+                assert_eq!(values.len(), 3);
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn parse_update() {
+        let stmt = parse_statement(r#"update users set name = "Bob", age = 30 where id == 42"#).unwrap();
+        match stmt {
+            CenqlStatement::Update { table, assignments, where_clause } => {
+                assert_eq!(table, "users");
+                assert_eq!(assignments.len(), 2);
+                assert_eq!(assignments[0].0, "name");
+                assert_eq!(assignments[1].0, "age");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn parse_update_no_where() {
+        let stmt = parse_statement(r#"update config set value = "new_value""#).unwrap();
+        match stmt {
+            CenqlStatement::Update { table, assignments, where_clause } => {
+                assert_eq!(table, "config");
+                assert_eq!(assignments.len(), 1);
+                assert!(where_clause.is_none());
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn parse_delete() {
+        let stmt = parse_statement(r#"delete from users where id == 42"#).unwrap();
+        match stmt {
+            CenqlStatement::Delete { table, where_clause } => {
+                assert_eq!(table, "users");
+                assert!(where_clause.is_some());
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn parse_delete_no_where() {
+        let stmt = parse_statement("delete from temp_table").unwrap();
+        match stmt {
+            CenqlStatement::Delete { table, where_clause } => {
+                assert_eq!(table, "temp_table");
+                assert!(where_clause.is_none());
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn parse_upsert() {
+        let stmt = parse_statement(r#"upsert into users { id: 1, name: "Alice" }"#).unwrap();
+        match stmt {
+            CenqlStatement::Upsert { table, values } => {
+                assert_eq!(table, "users");
+                assert_eq!(values.len(), 2);
+            }
+            _ => panic!("expected Upsert"),
+        }
+    }
+
+    // ========================================================================
+    // Transaction control tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_begin() {
+        let stmt = parse_statement("begin").unwrap();
+        assert!(matches!(stmt, CenqlStatement::Begin));
+    }
+
+    #[test]
+    fn parse_commit() {
+        let stmt = parse_statement("commit").unwrap();
+        assert!(matches!(stmt, CenqlStatement::Commit));
+    }
+
+    #[test]
+    fn parse_rollback() {
+        let stmt = parse_statement("rollback").unwrap();
+        assert!(matches!(stmt, CenqlStatement::Rollback));
+    }
+
+    // ========================================================================
+    // Set operation tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_union() {
+        let stmt = parse_statement(r#"from users | take 5 union from admins | take 5"#).unwrap();
+        match stmt {
+            CenqlStatement::Union { left, right, all } => {
+                assert!(left.len() >= 2);
+                assert!(right.len() >= 2);
+                assert!(!all);
+            }
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn parse_union_all() {
+        let stmt = parse_statement(r#"from a | take 3 union all from b | take 3"#).unwrap();
+        match stmt {
+            CenqlStatement::Union { all, .. } => assert!(all),
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn parse_intersect() {
+        let stmt = parse_statement(r#"from active_users intersect from verified_users"#).unwrap();
+        match stmt {
+            CenqlStatement::Intersect { .. } => {}
+            _ => panic!("expected Intersect"),
+        }
+    }
+
+    #[test]
+    fn parse_except() {
+        let stmt = parse_statement(r#"from all_users except from banned_users"#).unwrap();
+        match stmt {
+            CenqlStatement::Except { .. } => {}
+            _ => panic!("expected Except"),
+        }
+    }
+
+    #[test]
+    fn parse_distinct() {
+        let stmt = parse_statement(r#"distinct from users | select { country }"#).unwrap();
+        match stmt {
+            CenqlStatement::Distinct { pipeline } => {
+                assert!(pipeline.len() >= 2);
+            }
+            _ => panic!("expected Distinct"),
+        }
+    }
+
+    // ========================================================================
+    // CTE tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_cte() {
+        let stmt = parse_statement(r#"with active as (from users | filter status == "active") from active | take 10"#).unwrap();
+        match stmt {
+            CenqlStatement::WithCte { cte_name, cte_pipeline, main_pipeline } => {
+                assert_eq!(cte_name, "active");
+                assert!(cte_pipeline.len() >= 2);
+                assert!(main_pipeline.len() >= 2);
+            }
+            _ => panic!("expected WithCte"),
+        }
+    }
+
+    // ========================================================================
+    // Query as statement tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_query_as_statement() {
+        let stmt = parse_statement(r#"from users | filter age > 18 | take 10"#).unwrap();
+        match stmt {
+            CenqlStatement::Query(p) => assert_eq!(p.len(), 3),
+            _ => panic!("expected Query"),
+        }
+    }
+
+    // ========================================================================
+    // Error handling tests.
+    // ========================================================================
+
+    #[test]
+    fn parse_create_table_missing_brace() {
+        let result = parse_statement("create table users id: i64");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_insert_missing_into() {
+        let result = parse_statement(r#"insert users { id: 1 }"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_drop_missing_keyword() {
+        let result = parse_statement("drop users");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_empty_input() {
+        let result = parse_statement("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_create_index_missing_on() {
+        let result = parse_statement("create index idx users(name)");
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Statement display roundtrip tests.
+    // ========================================================================
+
+    #[test]
+    fn create_table_display_roundtrip() {
+        let stmt = parse_statement(r#"create table t { a: i64 not null, b: str }"#).unwrap();
+        let displayed = format!("{}", stmt);
+        assert!(displayed.contains("create table t"));
+        assert!(displayed.contains("a"));
+        assert!(displayed.contains("i64"));
+    }
+
+    #[test]
+    fn insert_display_roundtrip() {
+        let stmt = parse_statement(r#"insert into t { a: 1, b: "hello" }"#).unwrap();
+        let displayed = format!("{}", stmt);
+        assert!(displayed.contains("insert into t"));
+    }
+
+    #[test]
+    fn begin_commit_display() {
+        let begin = parse_statement("begin").unwrap();
+        assert_eq!(format!("{}", begin), "begin");
+        let commit = parse_statement("commit").unwrap();
+        assert_eq!(format!("{}", commit), "commit");
+        let rollback = parse_statement("rollback").unwrap();
+        assert_eq!(format!("{}", rollback), "rollback");
     }
 }

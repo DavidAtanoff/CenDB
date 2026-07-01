@@ -127,7 +127,7 @@ mod tests {
 // ============================================================================
 
 /// External merge sort: sorts data that exceeds memory by spilling
-/// sorted runs to "disk" (simulated as Vec<Vec<i64>> for the prototype).
+/// sorted runs to "disk" (simulated as Vec<Vec<i64>> for this implementation).
 pub struct ExternalMergeSort {
     /// Maximum number of rows per in-memory run.
     run_size: usize,

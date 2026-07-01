@@ -63,10 +63,10 @@ minipage as `&[i64]`, and returns. No allocation, no parse, no copy.
 
 | Crate | Layer | Responsibility |
 |---|---|---|
-| `cendb-core` | Foundation | Primitives: `PageId`, `BlockId`, `HexError`, `CenDbConfig`, `Value`. |
+| `cendb-core` | Foundation | Primitives: `PageId`, `BlockId`, `CenError`, `CenDbConfig`, `Value`. |
 | `cendb-storage` | Storage | PAX page format, segment files, encodings (Raw, BitPacked, FoR, DoD, Gorilla, RLE). |
 | `cendb-buffer` | Memory | User-space buffer pool, LRU-K eviction, `PinnedPage` RAII guard, optional mmap. |
-| `cendb-projection` | Models | KV, relational, document (HexDoc), time-series, graph (CSR overlay). |
+| `cendb-projection` | Models | KV, relational, document (CenDoc), time-series, graph (CSR overlay). |
 | `cendb-index` | Indexing | Adaptive Radix Tree (ART) primary index. |
 | `cendb-tx` | Transactions | MVCC, OCC validation, WAL with ARIES-lite recovery. |
 | `cendb-cenql` | Query | CenQL lexer + recursive-descent parser + AST. |
@@ -78,7 +78,7 @@ minipage as `&[i64]`, and returns. No allocation, no parse, no copy.
 A KV point lookup flows through the engine as follows:
 
 ```
-hex_kv_put(db, "alice", "password123")
+cendb_kv_put(db, "alice", "password123")
     │
     ▼
 ffi_guard { catch_unwind }            ← cendb-ffi
@@ -107,7 +107,7 @@ KvStore::index.insert(key, (block_id, slot))  ← in-memory hash index
 A read flows the opposite direction:
 
 ```
-hex_kv_get(db, "alice")
+cendb_kv_get(db, "alice")
     │
     ▼
 KvStore::get("alice")
@@ -158,7 +158,7 @@ To honour the resource-efficiency mandate:
   `mmap`. A KV-only build (`--no-default-features --features kv`) links
   neither the vectorized executor nor graph code.
 - **Lazy subsystem init**: the CSR overlay, JIT compiler, and
-  downsampler are constructed on first use, not at `hex_open`.
+  downsampler are constructed on first use, not at `cendb_open`.
 - **`panic = "abort"`, LTO, `opt-level = "z"`** profile for the minimal
   artifact; strip symbols.
 - **No `serde`/no reflection in the core** — hand-rolled zero-copy

@@ -20,5 +20,5 @@
 pub mod catalog;
 pub mod backup;
 
-pub use catalog::{SystemCatalog, TableInfo, ColumnInfo, IndexInfo};
+pub use catalog::{SystemCatalog, TableInfo, ColumnInfo, IndexInfo, ViewInfo, StoredProcedure};
 pub use backup::{HotBackup, BackupResult};

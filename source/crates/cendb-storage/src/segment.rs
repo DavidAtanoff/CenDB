@@ -4,7 +4,7 @@
 //! PAX blocks (each `block_size` bytes), and ends with a [`BlockDirectory`]
 //! written at seal time.
 //!
-//! For the prototype we use synchronous `pread`/`pwrite`-style I/O via
+//! For this implementation we use synchronous `pread`/`pwrite`-style I/O via
 //! `std::fs::File` + `seek`/`read_exact`/`write_all`. The buffer pool wraps
 //! these primitives with caching and pinning.
 
@@ -12,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use cendb_core::{BlockId, HexError, HexResult, SegmentId, FORMAT_VERSION, SEGMENT_MAGIC};
+use cendb_core::{BlockId, CenError, CenResult, SegmentId, FORMAT_VERSION, SEGMENT_MAGIC};
 
 use crate::header::SegmentHeader;
 use crate::pax::PaxBlock;
@@ -86,15 +86,15 @@ impl BlockDirectory {
     }
 
     /// Deserialise from bytes.
-    pub fn from_bytes(bytes: &[u8]) -> HexResult<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> CenResult<Self> {
         if bytes.len() < 4 {
-            return Err(HexError::corrupt("BlockDirectory: short header"));
+            return Err(CenError::corrupt("BlockDirectory: short header"));
         }
         let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         let body = &bytes[4..];
         let entry_size = core::mem::size_of::<BlockDirEntry>();
         if body.len() < count * entry_size {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "BlockDirectory: expected {} entries × {} bytes, got {}",
                 count,
                 entry_size,
@@ -138,7 +138,7 @@ impl SegmentWriter {
         page_size: u32,
         block_size: u32,
         created_lsn: u64,
-    ) -> HexResult<Self> {
+    ) -> CenResult<Self> {
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -157,7 +157,7 @@ impl SegmentWriter {
         Ok(me)
     }
 
-    fn write_header(&mut self) -> HexResult<()> {
+    fn write_header(&mut self) -> CenResult<()> {
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(bytemuck::bytes_of(&self.header))?;
         self.file.flush()?;
@@ -166,10 +166,10 @@ impl SegmentWriter {
 
     /// Append a finished PAX block to the segment. Returns the assigned
     /// `BlockId`.
-    pub fn append_block(&mut self, block: &PaxBlock) -> HexResult<BlockId> {
+    pub fn append_block(&mut self, block: &PaxBlock) -> CenResult<BlockId> {
         let bytes = block.as_bytes();
         if bytes.len() != self.block_size as usize {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "append_block: block is {} bytes, segment expects {}",
                 bytes.len(),
                 self.block_size
@@ -204,7 +204,7 @@ impl SegmentWriter {
 
     /// Seal the segment: write the block directory and mark the header as
     /// sealed. After this call the segment is immutable.
-    pub fn seal(&mut self, sealed_lsn: u64) -> HexResult<()> {
+    pub fn seal(&mut self, sealed_lsn: u64) -> CenResult<()> {
         let dir_bytes = self.block_dir.to_bytes();
         let dir_off = self.current_offset;
         self.file.seek(SeekFrom::Start(dir_off))?;
@@ -239,7 +239,7 @@ pub struct SegmentFile {
 
 impl SegmentFile {
     /// Open an existing segment file and load its header + block directory.
-    pub fn open(path: impl AsRef<Path>) -> HexResult<Self> {
+    pub fn open(path: impl AsRef<Path>) -> CenResult<Self> {
         let mut file = OpenOptions::new().read(true).open(path.as_ref())?;
         // Read header.
         let mut hdr_bytes = [0u8; core::mem::size_of::<SegmentHeader>()];
@@ -250,10 +250,10 @@ impl SegmentFile {
         // (which would require 8-byte alignment).
         let header: SegmentHeader = bytemuck::pod_read_unaligned(&hdr_bytes);
         if header.magic != SEGMENT_MAGIC {
-            return Err(HexError::corrupt("segment magic mismatch"));
+            return Err(CenError::corrupt("segment magic mismatch"));
         }
         if header.format_ver != FORMAT_VERSION {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "unsupported format version {}",
                 header.format_ver
             )));
@@ -279,15 +279,15 @@ impl SegmentFile {
 
     /// Read a single block's bytes into `buf`. `buf` must be at least
     /// `block_size` bytes long and 64-byte aligned for SIMD-safe access.
-    pub fn read_block(&mut self, block_id: BlockId, buf: &mut [u8]) -> HexResult<()> {
+    pub fn read_block(&mut self, block_id: BlockId, buf: &mut [u8]) -> CenResult<()> {
         let entry = self
             .block_dir
             .entries
             .iter()
             .find(|e| e.block_id == block_id.0)
-            .ok_or_else(|| HexError::not_found(format!("block {} not in directory", block_id.0)))?;
+            .ok_or_else(|| CenError::not_found(format!("block {} not in directory", block_id.0)))?;
         if buf.len() < self.block_size as usize {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "read_block: buf is {} bytes, need {}",
                 buf.len(),
                 self.block_size
@@ -300,9 +300,9 @@ impl SegmentFile {
 
     /// Convenience: read a block into a freshly allocated 64-byte-aligned
     /// buffer.
-    pub fn read_block_alloc(&mut self, block_id: BlockId) -> HexResult<Vec<u8>> {
+    pub fn read_block_alloc(&mut self, block_id: BlockId) -> CenResult<Vec<u8>> {
         let mut buf = vec![0u8; self.block_size as usize];
-        // Note: Vec<u8>'s allocation alignment may be < 64B. For the prototype
+        // Note: Vec<u8>'s allocation alignment may be < 64B. For this implementation
         // we accept this; the buffer pool path uses properly-aligned frames
         // for hot reads. We still succeed here for cold paths where zero-copy
         // SIMD is not required.
@@ -328,11 +328,11 @@ pub struct SegmentReader {
 }
 
 impl SegmentReader {
-    pub fn open(path: impl AsRef<Path>) -> HexResult<Self> {
+    pub fn open(path: impl AsRef<Path>) -> CenResult<Self> {
         Ok(Self { inner: SegmentFile::open(path)? })
     }
 
-    pub fn read_block_alloc(&mut self, block_id: BlockId) -> HexResult<Vec<u8>> {
+    pub fn read_block_alloc(&mut self, block_id: BlockId) -> CenResult<Vec<u8>> {
         self.inner.read_block_alloc(block_id)
     }
 

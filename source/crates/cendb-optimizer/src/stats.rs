@@ -32,7 +32,7 @@ impl ColumnStats {
         // Basic estimate: 1 / distinct_count.
         let base = 1.0 / self.distinct_count as f64;
         // If we have MCV stats, use them.
-        // For the prototype we just use the base estimate.
+        // For this implementation we just use the base estimate.
         base
     }
 
@@ -111,14 +111,19 @@ impl TableStats {
 // ============================================================================
 
 /// In-memory catalog of table statistics, used by the optimizer.
+#[derive(Clone, Debug)]
 pub struct StatsCatalog {
     tables: HashMap<String, TableStats>,
+    /// Indexes registered on `(table, column)`. Each entry maps a column
+    /// name to the index name to use in `IndexScan`.
+    indexes: HashMap<String, Vec<(String, String)>>, // table -> Vec<(column, index_name)>
 }
 
 impl StatsCatalog {
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -127,9 +132,30 @@ impl StatsCatalog {
         self.tables.insert(stats.name.clone(), stats);
     }
 
+    /// Register an index on `table.column`. The `index_name` is used in
+    /// the generated `IndexScan` operator.
+    pub fn register_index(&mut self, table: &str, column: &str, index_name: &str) {
+        self.indexes
+            .entry(table.to_string())
+            .or_default()
+            .push((column.to_string(), index_name.to_string()));
+    }
+
     /// Look up table statistics by name.
     pub fn get(&self, table: &str) -> Option<&TableStats> {
         self.tables.get(table)
+    }
+
+    /// Is there an index on `table.column`? Returns the index name if so.
+    pub fn index_for(&self, table: &str, column: &str) -> Option<&str> {
+        self.indexes
+            .get(table)
+            .and_then(|cols| cols.iter().find(|(c, _)| c == column).map(|(_, idx)| idx.as_str()))
+    }
+
+    /// Whether `table.column` has an index.
+    pub fn has_index(&self, table: &str, column: &str) -> bool {
+        self.index_for(table, column).is_some()
     }
 
     /// Estimate the cardinality of a join between two tables.

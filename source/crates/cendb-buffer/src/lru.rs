@@ -20,7 +20,7 @@
 //! * Among evictable frames, we pick the one whose *K-th-most-recent* (i.e.
 //!   oldest) access timestamp is the smallest — the classic LRU-K rule.
 //!
-//! This is single-threaded for the prototype. A production version would
+//! This is single-threaded for this implementation. A production version would
 //! guard the structures with a small spinlock or use a lock-free skip list.
 
 use std::collections::{HashMap, VecDeque};

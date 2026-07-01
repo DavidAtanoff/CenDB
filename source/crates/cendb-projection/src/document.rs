@@ -1,6 +1,6 @@
-//! Document projection: HexDoc binary JSON layout.
+//! Document projection: CenDoc binary JSON layout.
 //!
-//! `HexDoc` is a compact binary format for nested JSON-like documents with
+//! `CenDoc` is a compact binary format for nested JSON-like documents with
 //! an O(1) field offset table at the front. The layout is:
 //!
 //! ```text
@@ -28,9 +28,9 @@
 
 use std::collections::HashMap;
 
-use cendb_core::{HexError, HexResult};
+use cendb_core::{CenError, CenResult};
 
-/// Magic bytes for the HexDoc format.
+/// Magic bytes for the CenDoc format.
 pub const HEX_DOC_MAGIC: [u8; 4] = *b"HEXD";
 
 /// Tag for the kind of a `DocValue`.
@@ -65,7 +65,7 @@ impl DocKind {
 
 /// A JSON-like value used in the document projection. Owned (allocated) so
 /// it can be built up programmatically before serialisation into the
-/// compact HexDoc bytes.
+/// compact CenDoc bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocValue {
     Null,
@@ -110,8 +110,8 @@ impl DocValue {
     }
 }
 
-/// Builder for serialising a `DocValue` into HexDoc bytes.
-pub struct HexDocBuilder {
+/// Builder for serialising a `DocValue` into CenDoc bytes.
+pub struct CenDocBuilder {
     out: Vec<u8>,
     /// String interning table: string content → string id.
     /// We deduplicate identical strings to save space.
@@ -119,7 +119,7 @@ pub struct HexDocBuilder {
     string_pool: Vec<u8>,
 }
 
-impl HexDocBuilder {
+impl CenDocBuilder {
     pub fn new() -> Self {
         Self {
             out: Vec::new(),
@@ -128,8 +128,8 @@ impl HexDocBuilder {
         }
     }
 
-    /// Serialise a `DocValue` into HexDoc bytes.
-    pub fn encode(value: &DocValue) -> HexResult<Vec<u8>> {
+    /// Serialise a `DocValue` into CenDoc bytes.
+    pub fn encode(value: &DocValue) -> CenResult<Vec<u8>> {
         let mut builder = Self::new();
         // Reserve 20-byte header.
         builder.out.extend_from_slice(&[0u8; 20]);
@@ -139,7 +139,7 @@ impl HexDocBuilder {
         let string_pool_off = builder.out.len() as u32;
         builder.out.extend_from_slice(&builder.string_pool);
         // Now write the header.
-        let header = HexDocHeader {
+        let header = CenDocHeader {
             magic: HEX_DOC_MAGIC,
             root_kind: value.kind() as u8,
             _pad: [0; 3],
@@ -156,7 +156,7 @@ impl HexDocBuilder {
         Ok(builder.out)
     }
 
-    fn intern_string(&mut self, s: &str) -> HexResult<u32> {
+    fn intern_string(&mut self, s: &str) -> CenResult<u32> {
         if let Some(&id) = self.strings.get(s) {
             return Ok(id);
         }
@@ -168,7 +168,7 @@ impl HexDocBuilder {
         Ok(id)
     }
 
-    fn encode_value(&mut self, value: &DocValue) -> HexResult<usize> {
+    fn encode_value(&mut self, value: &DocValue) -> CenResult<usize> {
         let off = self.out.len();
         // Write kind tag.
         self.out.push(value.kind() as u8);
@@ -228,15 +228,15 @@ impl HexDocBuilder {
     }
 }
 
-impl Default for HexDocBuilder {
+impl Default for CenDocBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// HexDoc header (20 bytes).
+/// CenDoc header (20 bytes).
 #[derive(Copy, Clone, Debug)]
-pub struct HexDocHeader {
+pub struct CenDocHeader {
     pub magic: [u8; 4],
     pub root_kind: u8,
     pub _pad: [u8; 3],
@@ -245,15 +245,15 @@ pub struct HexDocHeader {
     pub string_pool_off: u32,
 }
 
-impl HexDocHeader {
-    pub fn from_bytes(bytes: &[u8]) -> HexResult<Self> {
+impl CenDocHeader {
+    pub fn from_bytes(bytes: &[u8]) -> CenResult<Self> {
         if bytes.len() < 20 {
-            return Err(HexError::corrupt("HexDoc header too short"));
+            return Err(CenError::corrupt("CenDoc header too short"));
         }
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&bytes[0..4]);
         if magic != HEX_DOC_MAGIC {
-            return Err(HexError::corrupt("HexDoc magic mismatch"));
+            return Err(CenError::corrupt("CenDoc magic mismatch"));
         }
         Ok(Self {
             magic,
@@ -277,17 +277,17 @@ impl HexDocHeader {
     }
 }
 
-/// Reader for a HexDoc document. Borrows the bytes; lifetime tied to the
+/// Reader for a CenDoc document. Borrows the bytes; lifetime tied to the
 /// owning buffer (typically a PAX var-heap slice).
-pub struct HexDoc<'a> {
+pub struct CenDoc<'a> {
     bytes: &'a [u8],
-    header: HexDocHeader,
+    header: CenDocHeader,
 }
 
-impl<'a> HexDoc<'a> {
+impl<'a> CenDoc<'a> {
     /// Construct a reader over `bytes`. Validates the magic.
-    pub fn new(bytes: &'a [u8]) -> HexResult<Self> {
-        let header = HexDocHeader::from_bytes(bytes)?;
+    pub fn new(bytes: &'a [u8]) -> CenResult<Self> {
+        let header = CenDocHeader::from_bytes(bytes)?;
         Ok(Self { bytes, header })
     }
 
@@ -298,7 +298,7 @@ impl<'a> HexDoc<'a> {
 
     /// Decode the root value into an owned `DocValue`. This walks the entire
     /// document — for point field access use [`get_field`] instead.
-    pub fn decode_root(&self) -> HexResult<DocValue> {
+    pub fn decode_root(&self) -> CenResult<DocValue> {
         self.decode_value_at(self.header.root_off as usize)
     }
 
@@ -308,7 +308,7 @@ impl<'a> HexDoc<'a> {
     /// This is the O(1) fast path: we walk the field offset table looking
     /// for a matching name id, then jump to the value offset. No parsing of
     /// unrelated fields.
-    pub fn get_field(&self, name: &str) -> HexResult<Option<DocValue>> {
+    pub fn get_field(&self, name: &str) -> CenResult<Option<DocValue>> {
         if self.root_kind() != DocKind::Object {
             return Ok(None);
         }
@@ -319,7 +319,7 @@ impl<'a> HexDoc<'a> {
         for i in 0..field_count {
             let entry_off = table_off + i * 8;
             if entry_off + 8 > self.bytes.len() {
-                return Err(HexError::corrupt("HexDoc: field table truncated"));
+                return Err(CenError::corrupt("CenDoc: field table truncated"));
             }
             let name_id = u32::from_le_bytes([
                 self.bytes[entry_off],
@@ -343,7 +343,7 @@ impl<'a> HexDoc<'a> {
 
     /// Navigate a dotted path like `user.address.city` through nested
     /// objects. Returns `None` if any segment is missing or non-object.
-    pub fn get_path(&self, path: &str) -> HexResult<Option<DocValue>> {
+    pub fn get_path(&self, path: &str) -> CenResult<Option<DocValue>> {
         let segments: Vec<&str> = path.split('.').collect();
         let mut current = self.decode_root()?;
         for seg in segments {
@@ -355,10 +355,23 @@ impl<'a> HexDoc<'a> {
         Ok(Some(current))
     }
 
-    fn decode_value_at(&self, off: usize) -> HexResult<DocValue> {
+    fn decode_value_at(&self, off: usize) -> CenResult<DocValue> {
+        self.decode_value_at_depth(off, 0)
+    }
+
+    fn decode_value_at_depth(&self, off: usize, depth: usize) -> CenResult<DocValue> {
+        // Prevent stack overflow from maliciously crafted deeply-nested
+        // documents. A depth of 256 is far beyond any reasonable use case.
+        const MAX_DEPTH: usize = 256;
+        if depth > MAX_DEPTH {
+            return Err(CenError::corrupt(format!(
+                "CenDoc: nesting depth {} exceeds maximum {}",
+                depth, MAX_DEPTH
+            )));
+        }
         if off >= self.bytes.len() {
-            return Err(HexError::corrupt(format!(
-                "HexDoc: value offset {} out of bounds",
+            return Err(CenError::corrupt(format!(
+                "CenDoc: value offset {} out of bounds",
                 off
             )));
         }
@@ -368,13 +381,13 @@ impl<'a> HexDoc<'a> {
             DocKind::Null => Ok(DocValue::Null),
             DocKind::Bool => {
                 if body.is_empty() {
-                    return Err(HexError::corrupt("HexDoc: bool truncated"));
+                    return Err(CenError::corrupt("CenDoc: bool truncated"));
                 }
                 Ok(DocValue::Bool(body[0] != 0))
             }
             DocKind::I64 => {
                 if body.len() < 8 {
-                    return Err(HexError::corrupt("HexDoc: i64 truncated"));
+                    return Err(CenError::corrupt("CenDoc: i64 truncated"));
                 }
                 Ok(DocValue::I64(i64::from_le_bytes([
                     body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7],
@@ -382,7 +395,7 @@ impl<'a> HexDoc<'a> {
             }
             DocKind::F64 => {
                 if body.len() < 8 {
-                    return Err(HexError::corrupt("HexDoc: f64 truncated"));
+                    return Err(CenError::corrupt("CenDoc: f64 truncated"));
                 }
                 Ok(DocValue::F64(f64::from_bits(u64::from_le_bytes([
                     body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7],
@@ -390,7 +403,7 @@ impl<'a> HexDoc<'a> {
             }
             DocKind::Str => {
                 if body.len() < 4 {
-                    return Err(HexError::corrupt("HexDoc: str truncated"));
+                    return Err(CenError::corrupt("CenDoc: str truncated"));
                 }
                 let id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                 let s = self.read_string(id)?;
@@ -398,11 +411,11 @@ impl<'a> HexDoc<'a> {
             }
             DocKind::Bytes => {
                 if body.len() < 4 {
-                    return Err(HexError::corrupt("HexDoc: bytes truncated"));
+                    return Err(CenError::corrupt("CenDoc: bytes truncated"));
                 }
                 let len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                 if body.len() < 4 + len {
-                    return Err(HexError::corrupt("HexDoc: bytes payload truncated"));
+                    return Err(CenError::corrupt("CenDoc: bytes payload truncated"));
                 }
                 Ok(DocValue::Bytes(body[4..4 + len].to_vec()))
             }
@@ -412,7 +425,7 @@ impl<'a> HexDoc<'a> {
                 // header. We encode the count inline as a u32 right after
                 // the kind tag for non-root objects.
                 if body.len() < 4 {
-                    return Err(HexError::corrupt("HexDoc: object truncated"));
+                    return Err(CenError::corrupt("CenDoc: object truncated"));
                 }
                 let field_count = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                 let table_off = 4;
@@ -420,7 +433,7 @@ impl<'a> HexDoc<'a> {
                 for i in 0..field_count {
                     let entry_off = table_off + i * 8;
                     if entry_off + 8 > body.len() {
-                        return Err(HexError::corrupt("HexDoc: object table truncated"));
+                        return Err(CenError::corrupt("CenDoc: object table truncated"));
                     }
                     let name_id = u32::from_le_bytes([
                         body[entry_off],
@@ -435,14 +448,14 @@ impl<'a> HexDoc<'a> {
                         body[entry_off + 7],
                     ]) as usize;
                     let name = self.read_string(name_id as usize)?;
-                    let val = self.decode_value_at(val_off)?;
+                    let val = self.decode_value_at_depth(val_off, depth + 1)?;
                     fields.push((name, val));
                 }
                 Ok(DocValue::Object(fields))
             }
             DocKind::Array => {
                 if body.len() < 4 {
-                    return Err(HexError::corrupt("HexDoc: array truncated"));
+                    return Err(CenError::corrupt("CenDoc: array truncated"));
                 }
                 let count = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
                 let table_off = 4;
@@ -450,7 +463,7 @@ impl<'a> HexDoc<'a> {
                 for i in 0..count {
                     let entry_off = table_off + i * 4;
                     if entry_off + 4 > body.len() {
-                        return Err(HexError::corrupt("HexDoc: array table truncated"));
+                        return Err(CenError::corrupt("CenDoc: array table truncated"));
                     }
                     let val_off = u32::from_le_bytes([
                         body[entry_off],
@@ -458,7 +471,7 @@ impl<'a> HexDoc<'a> {
                         body[entry_off + 2],
                         body[entry_off + 3],
                     ]) as usize;
-                    items.push(self.decode_value_at(val_off)?);
+                    items.push(self.decode_value_at_depth(val_off, depth + 1)?);
                 }
                 Ok(DocValue::Array(items))
             }
@@ -467,19 +480,19 @@ impl<'a> HexDoc<'a> {
 
     /// Read a string from the string pool. The pool is a sequence of
     /// length-prefixed (u32 LE) UTF-8 strings, indexed by byte offset.
-    fn read_string(&self, offset: usize) -> HexResult<String> {
-        // We need to find the string pool. For the prototype, we search for
+    fn read_string(&self, offset: usize) -> CenResult<String> {
+        // We need to find the string pool. For this implementation, we search for
         // it at the end of the buffer (the builder appends it there).
         // A more robust format would record the pool offset in the header;
-        // for now we scan from the root offset.
+        // currently we scan from the root offset.
         // To keep this simple, we re-find the pool by walking from root.
         // The builder always appends the string pool at the end of the
         // buffer. We treat `offset` as a position within that pool.
         let pool_start = self.find_string_pool()?;
         let abs = pool_start + offset;
         if abs + 4 > self.bytes.len() {
-            return Err(HexError::corrupt(format!(
-                "HexDoc: string offset {} out of bounds",
+            return Err(CenError::corrupt(format!(
+                "CenDoc: string offset {} out of bounds",
                 offset
             )));
         }
@@ -492,18 +505,18 @@ impl<'a> HexDoc<'a> {
         let start = abs + 4;
         let end = start + len;
         if end > self.bytes.len() {
-            return Err(HexError::corrupt("HexDoc: string payload truncated"));
+            return Err(CenError::corrupt("CenDoc: string payload truncated"));
         }
         Ok(String::from_utf8_lossy(&self.bytes[start..end]).into_owned())
     }
 
     /// The string pool offset is stored in the header's `string_pool_off`
     /// field (a full u32, supports pools up to 4 GiB).
-    fn find_string_pool(&self) -> HexResult<usize> {
+    fn find_string_pool(&self) -> CenResult<usize> {
         let pool_off = self.header.string_pool_off as usize;
         if pool_off >= self.bytes.len() {
-            return Err(HexError::corrupt(format!(
-                "HexDoc: pool offset {} out of bounds (buf len {})",
+            return Err(CenError::corrupt(format!(
+                "CenDoc: pool offset {} out of bounds (buf len {})",
                 pool_off,
                 self.bytes.len()
             )));
@@ -523,8 +536,8 @@ mod tests {
             ("age".to_string(), DocValue::I64(30)),
             ("active".to_string(), DocValue::Bool(true)),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         assert_eq!(reader.root_kind(), DocKind::Object);
 
         let name = reader.get_field("name").unwrap().unwrap();
@@ -551,8 +564,8 @@ mod tests {
             ])),
             ("active".to_string(), DocValue::Bool(true)),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
 
         // Dotted-path access.
         let city = reader.get_path("user.address.city").unwrap().unwrap();
@@ -571,8 +584,8 @@ mod tests {
                 DocValue::I64(3),
             ])),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         let items = reader.get_field("items").unwrap().unwrap();
         match items {
             DocValue::Array(a) => {
@@ -589,8 +602,8 @@ mod tests {
         let doc = DocValue::Object(vec![
             ("name".to_string(), DocValue::Str("Bob".to_string())),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         assert!(reader.get_field("nonexistent").unwrap().is_none());
     }
 }

@@ -56,33 +56,9 @@ pub fn is_stopword(word: &str) -> bool {
 /// Simplified Porter stemmer: strips common English suffixes.
 /// This is not a full Porter stemmer but covers the most common cases.
 pub fn stem(word: &str) -> String {
-    let w = word;
-    // Order matters: try longer suffixes first.
-    // Plurals
-    let w = if w.ends_with("sses") {
-        &w[..w.len() - 2] // caresses → caress
-    } else if w.ends_with("ies") {
-        &w[..w.len() - 2] // ponies → poni
-    } else if w.ends_with("ss") {
-        w // caress → caress
-    } else if w.ends_with("s") && w.len() > 3 {
-        &w[..w.len() - 1] // cats → cat
-    } else {
-        w
-    };
-
-    // Past tense / participle
-    let w = if w.ends_with("eed") && w.len() > 4 {
-        &w[..w.len() - 1] // agreed → agree
-    } else if w.ends_with("ed") && w.len() > 3 {
-        &w[..w.len() - 2] // plastered → plaster
-    } else if w.ends_with("ing") && w.len() > 4 {
-        &w[..w.len() - 3] // motoring → motor
-    } else {
-        w
-    };
-
-    w.to_string()
+    // Delegate to the full Porter stemmer in `crate::stemmer` for
+    // consistency between indexed terms and query terms.
+    crate::stemmer::stem(word)
 }
 
 #[cfg(test)]

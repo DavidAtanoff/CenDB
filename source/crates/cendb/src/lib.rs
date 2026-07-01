@@ -32,6 +32,9 @@
 //!
 //! A minimal KV-only build: `--no-default-features --features kv`.
 
+pub mod jit_integration;
+pub mod optimizer_integration;
+
 pub use cendb_buffer;
 pub use cendb_core;
 
@@ -62,7 +65,7 @@ pub use cendb_tx;
 /// Convenience re-export of the most common types.
 pub mod prelude {
     pub use cendb_core::{
-        BlockId, CenDbConfig, FrameId, HexError, HexResult, HexStatus, Model, NodeId, PageId,
+        BlockId, CenDbConfig, FrameId, CenError, CenResult, CenStatus, Model, NodeId, PageId,
         RowLocator, SegmentId, SlotId, Value, ValueKind,
     };
     pub use cendb_storage::header::{BlockHeader, ColumnDirectory, ColumnSpec, SegmentHeader};
@@ -72,13 +75,13 @@ pub mod prelude {
     pub use cendb_buffer::{BufferPool, Frame, LruK, PinnedPage, PoolStats, ReadHint};
 
     pub use cendb_projection::{
-        CsrOverlay, DocValue, GraphProjection, HexDoc, HexDocBuilder, KvProjection, KvStore,
+        CsrOverlay, DocValue, GraphProjection, CenDoc, CenDocBuilder, KvProjection, KvStore,
         RelationalProjection, RelationalTable, TimeSeriesProjection, TimeSeriesSchema,
         TimeSeriesStore,
     };
 
     #[cfg(feature = "index")]
-    pub use cendb_index::{ArtIter, ArtRangeIter, ArtTree};
+    pub use cendb_index::{ArtIter, ArtTree};
 
     #[cfg(feature = "tx")]
     pub use cendb_tx::{

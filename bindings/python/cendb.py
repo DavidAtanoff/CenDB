@@ -47,7 +47,7 @@ from pathlib import Path
 # ============================================================================
 
 
-class HexStatus:
+class CenStatus:
     OK = 0
     ERR_NOT_FOUND = 1
     ERR_CONSTRAINT = 2
@@ -58,7 +58,7 @@ class HexStatus:
     ERR_INTERNAL = 99
 
 
-class HexConfig(Structure):
+class CenConfig(Structure):
     _fields_ = [
         ("page_size", c_uint32),
         ("block_size", c_uint32),
@@ -68,7 +68,7 @@ class HexConfig(Structure):
     ]
 
     @classmethod
-    def default(cls) -> "HexConfig":
+    def default(cls) -> "CenConfig":
         return cls(
             page_size=4096,
             block_size=65536,
@@ -78,7 +78,7 @@ class HexConfig(Structure):
         )
 
 
-class HexBytes(Structure):
+class CenBytes(Structure):
     _fields_ = [
         ("ptr", POINTER(c_uint8)),
         ("len", c_size_t),
@@ -91,7 +91,7 @@ class HexBytes(Structure):
         return ctypes.string_at(self.ptr, self.len)
 
 
-class HexArrowResult(Structure):
+class CenArrowResult(Structure):
     _fields_ = [
         ("batch_count", c_uint64),
         ("row_count", c_uint64),
@@ -146,79 +146,79 @@ _LIB = _load_library()
 # ============================================================================
 
 
-_LIB.hex_open.argtypes = [c_char_p, POINTER(HexConfig), POINTER(ctypes.c_void_p)]
-_LIB.hex_open.restype = c_int
+_LIB.cendb_open.argtypes = [c_char_p, POINTER(CenConfig), POINTER(ctypes.c_void_p)]
+_LIB.cendb_open.restype = c_int
 
-_LIB.hex_close.argtypes = [ctypes.c_void_p]
-_LIB.hex_close.restype = c_int
+_LIB.cendb_close.argtypes = [ctypes.c_void_p]
+_LIB.cendb_close.restype = c_int
 
-_LIB.hex_kv_put.argtypes = [
+_LIB.cendb_kv_put.argtypes = [
     ctypes.c_void_p,
     POINTER(c_uint8),
     c_size_t,
     POINTER(c_uint8),
     c_size_t,
 ]
-_LIB.hex_kv_put.restype = c_int
+_LIB.cendb_kv_put.restype = c_int
 
-_LIB.hex_kv_get.argtypes = [
+_LIB.cendb_kv_get.argtypes = [
     ctypes.c_void_p,
     POINTER(c_uint8),
     c_size_t,
-    POINTER(HexBytes),
+    POINTER(CenBytes),
 ]
-_LIB.hex_kv_get.restype = c_int
+_LIB.cendb_kv_get.restype = c_int
 
-_LIB.hex_ts_append.argtypes = [ctypes.c_void_p, c_int64, c_int64, c_double]
-_LIB.hex_ts_append.restype = c_int
+_LIB.cendb_ts_append.argtypes = [ctypes.c_void_p, c_int64, c_int64, c_double]
+_LIB.cendb_ts_append.restype = c_int
 
-_LIB.hex_ts_flush.argtypes = [ctypes.c_void_p]
-_LIB.hex_ts_flush.restype = c_int
+_LIB.cendb_ts_flush.argtypes = [ctypes.c_void_p]
+_LIB.cendb_ts_flush.restype = c_int
 
-_LIB.hex_ts_range_count.argtypes = [
+_LIB.cendb_ts_range_count.argtypes = [
     ctypes.c_void_p,
     c_int64,
     c_int64,
     POINTER(c_uint64),
 ]
-_LIB.hex_ts_range_count.restype = c_int
+_LIB.cendb_ts_range_count.restype = c_int
 
-_LIB.hex_query_arrow.argtypes = [
+_LIB.cendb_query_arrow.argtypes = [
     ctypes.c_void_p,
     c_char_p,
-    POINTER(HexArrowResult),
+    POINTER(CenArrowResult),
 ]
-_LIB.hex_query_arrow.restype = c_int
+_LIB.cendb_query_arrow.restype = c_int
 
-_LIB.hex_arrow_result_free.argtypes = [POINTER(HexArrowResult)]
-_LIB.hex_arrow_result_free.restype = None
+_LIB.cendb_arrow_result_free.argtypes = [POINTER(CenArrowResult)]
+_LIB.cendb_arrow_result_free.restype = None
 
-_LIB.hex_bytes_free.argtypes = [POINTER(HexBytes)]
-_LIB.hex_bytes_free.restype = None
+_LIB.cendb_bytes_free.argtypes = [POINTER(CenBytes)]
+_LIB.cendb_bytes_free.restype = None
 
-_LIB.hex_graph_add_node.argtypes = [ctypes.c_void_p, c_uint64, c_char_p]
-_LIB.hex_graph_add_node.restype = c_int
+_LIB.cendb_graph_add_node.argtypes = [ctypes.c_void_p, c_uint64, c_char_p]
+_LIB.cendb_graph_add_node.restype = c_int
 
-_LIB.hex_graph_add_edge.argtypes = [ctypes.c_void_p, c_uint64, c_uint64, c_char_p]
-_LIB.hex_graph_add_edge.restype = c_int
+_LIB.cendb_graph_add_edge.argtypes = [ctypes.c_void_p, c_uint64, c_uint64, c_char_p]
+_LIB.cendb_graph_add_edge.restype = c_int
 
-_LIB.hex_graph_bfs.argtypes = [ctypes.c_void_p, c_uint64, c_uint32, POINTER(HexBytes)]
-_LIB.hex_graph_bfs.restype = c_int
+_LIB.cendb_graph_bfs.argtypes = [ctypes.c_void_p, c_uint64, c_uint32, POINTER(CenBytes)]
+_LIB.cendb_graph_bfs.restype = c_int
 
-_LIB.hex_doc_put.argtypes = [ctypes.c_void_p, POINTER(c_uint8), c_size_t, POINTER(c_uint8), c_size_t]
-_LIB.hex_doc_put.restype = c_int
+_LIB.cendb_doc_put.argtypes = [ctypes.c_void_p, POINTER(c_uint8), c_size_t, POINTER(c_uint8), c_size_t]
+_LIB.cendb_doc_put.restype = c_int
 
-_LIB.hex_doc_get_field.argtypes = [ctypes.c_void_p, POINTER(c_uint8), c_size_t, c_char_p, POINTER(HexBytes)]
-_LIB.hex_doc_get_field.restype = c_int
+_LIB.cendb_doc_get_field.argtypes = [ctypes.c_void_p, POINTER(c_uint8), c_size_t, c_char_p, POINTER(CenBytes)]
+_LIB.cendb_doc_get_field.restype = c_int
 
-_LIB.hex_last_error_message.argtypes = []
-_LIB.hex_last_error_message.restype = c_char_p
+_LIB.cendb_last_error_message.argtypes = []
+_LIB.cendb_last_error_message.restype = c_char_p
 
-_LIB.hex_clear_last_error.argtypes = []
-_LIB.hex_clear_last_error.restype = None
+_LIB.cendb_clear_last_error.argtypes = []
+_LIB.cendb_clear_last_error.restype = None
 
-_LIB.hex_version.argtypes = []
-_LIB.hex_version.restype = c_char_p
+_LIB.cendb_version.argtypes = []
+_LIB.cendb_version.restype = c_char_p
 
 
 # ============================================================================
@@ -230,14 +230,14 @@ class CenDBError(Exception):
     """Raised when an FFI call returns a non-OK status."""
 
     def __init__(self, status: int, message: str):
-        super().__init__(f"HexStatus={status}: {message}")
+        super().__init__(f"CenStatus={status}: {message}")
         self.status = status
         self.message = message
 
 
 def _check(status: int) -> None:
-    if status != HexStatus.OK:
-        msg_ptr = _LIB.hex_last_error_message()
+    if status != CenStatus.OK:
+        msg_ptr = _LIB.cendb_last_error_message()
         msg = msg_ptr.decode("utf-8") if msg_ptr else "(no message)"
         raise CenDBError(status, msg)
 
@@ -254,18 +254,18 @@ class Database:
         self._handle = _handle
 
     @classmethod
-    def open(cls, path: str | None = None, config: HexConfig | None = None) -> "Database":
-        cfg = config or HexConfig.default()
+    def open(cls, path: str | None = None, config: CenConfig | None = None) -> "Database":
+        cfg = config or CenConfig.default()
         path_bytes = path.encode("utf-8") if path else None
         handle = ctypes.c_void_p()
-        _check(_LIB.hex_open(path_bytes, byref(cfg), byref(handle)))
+        _check(_LIB.cendb_open(path_bytes, byref(cfg), byref(handle)))
         return cls(handle.value)
 
     def kv_put(self, key: bytes, value: bytes) -> None:
         key_buf = (c_uint8 * len(key))(*key) if key else None
         val_buf = (c_uint8 * len(value))(*value) if value else None
         _check(
-            _LIB.hex_kv_put(
+            _LIB.cendb_kv_put(
                 self._handle,
                 key_buf,
                 len(key),
@@ -276,72 +276,72 @@ class Database:
 
     def kv_get(self, key: bytes) -> bytes | None:
         key_buf = (c_uint8 * len(key))(*key) if key else None
-        out = HexBytes()
-        status = _LIB.hex_kv_get(self._handle, key_buf, len(key), byref(out))
-        if status == HexStatus.ERR_NOT_FOUND:
+        out = CenBytes()
+        status = _LIB.cendb_kv_get(self._handle, key_buf, len(key), byref(out))
+        if status == CenStatus.ERR_NOT_FOUND:
             return None
         _check(status)
         try:
             return out.to_bytes()
         finally:
-            _LIB.hex_bytes_free(byref(out))
+            _LIB.cendb_bytes_free(byref(out))
 
     def ts_append(self, ts: int, series_id: int, value: float) -> None:
-        _check(_LIB.hex_ts_append(self._handle, ts, series_id, value))
+        _check(_LIB.cendb_ts_append(self._handle, ts, series_id, value))
 
     def ts_flush(self) -> None:
-        _check(_LIB.hex_ts_flush(self._handle))
+        _check(_LIB.cendb_ts_flush(self._handle))
 
     def ts_range_count(self, lo: int, hi: int) -> int:
         out = c_uint64(0)
-        _check(_LIB.hex_ts_range_count(self._handle, lo, hi, byref(out)))
+        _check(_LIB.cendb_ts_range_count(self._handle, lo, hi, byref(out)))
         return out.value
 
     def query_arrow(self, query: str) -> int:
-        out = HexArrowResult()
-        _check(_LIB.hex_query_arrow(self._handle, query.encode("utf-8"), byref(out)))
+        out = CenArrowResult()
+        _check(_LIB.cendb_query_arrow(self._handle, query.encode("utf-8"), byref(out)))
         try:
             return out.row_count
         finally:
-            _LIB.hex_arrow_result_free(byref(out))
+            _LIB.cendb_arrow_result_free(byref(out))
 
     def graph_add_node(self, node_id: int, label: str) -> None:
-        _check(_LIB.hex_graph_add_node(self._handle, node_id, label.encode("utf-8")))
+        _check(_LIB.cendb_graph_add_node(self._handle, node_id, label.encode("utf-8")))
 
     def graph_add_edge(self, src: int, dst: int, label: str) -> None:
-        _check(_LIB.hex_graph_add_edge(self._handle, src, dst, label.encode("utf-8")))
+        _check(_LIB.cendb_graph_add_edge(self._handle, src, dst, label.encode("utf-8")))
 
     def graph_bfs(self, start_node: int, depth: int) -> list[int]:
-        out = HexBytes()
-        _check(_LIB.hex_graph_bfs(self._handle, start_node, depth, byref(out)))
+        out = CenBytes()
+        _check(_LIB.cendb_graph_bfs(self._handle, start_node, depth, byref(out)))
         try:
             b = out.to_bytes()
             import struct
             count = len(b) // 8
             return list(struct.unpack(f"<{count}Q", b))
         finally:
-            _LIB.hex_bytes_free(byref(out))
+            _LIB.cendb_bytes_free(byref(out))
 
     def doc_put(self, key: bytes, doc_bytes: bytes) -> None:
         key_buf = (c_uint8 * len(key))(*key) if key else None
         doc_buf = (c_uint8 * len(doc_bytes))(*doc_bytes) if doc_bytes else None
-        _check(_LIB.hex_doc_put(self._handle, key_buf, len(key), doc_buf, len(doc_bytes)))
+        _check(_LIB.cendb_doc_put(self._handle, key_buf, len(key), doc_buf, len(doc_bytes)))
 
     def doc_get_field(self, key: bytes, field_path: str) -> str | None:
         key_buf = (c_uint8 * len(key))(*key) if key else None
-        out = HexBytes()
-        status = _LIB.hex_doc_get_field(self._handle, key_buf, len(key), field_path.encode("utf-8"), byref(out))
-        if status == HexStatus.ERR_NOT_FOUND:
+        out = CenBytes()
+        status = _LIB.cendb_doc_get_field(self._handle, key_buf, len(key), field_path.encode("utf-8"), byref(out))
+        if status == CenStatus.ERR_NOT_FOUND:
             return None
         _check(status)
         try:
             return out.to_bytes().decode("utf-8")
         finally:
-            _LIB.hex_bytes_free(byref(out))
+            _LIB.cendb_bytes_free(byref(out))
 
     def close(self) -> None:
         if self._handle:
-            _check(_LIB.hex_close(self._handle))
+            _check(_LIB.cendb_close(self._handle))
             self._handle = None
 
     def __enter__(self) -> "Database":
@@ -356,20 +356,20 @@ class Database:
 # ============================================================================
 
 
-def open(path: str | None = None, config: HexConfig | None = None) -> Database:
+def open(path: str | None = None, config: CenConfig | None = None) -> Database:
     """Open a CenDB database. Shorthand for `Database.open`."""
     return Database.open(path, config)
 
 
 def version() -> str:
     """Return the CenDB library version string."""
-    return _LIB.hex_version().decode("utf-8")
+    return _LIB.cendb_version().decode("utf-8")
 
 
 __all__ = [
     "Database",
-    "HexConfig",
-    "HexStatus",
+    "CenConfig",
+    "CenStatus",
     "CenDBError",
     "open",
     "version",

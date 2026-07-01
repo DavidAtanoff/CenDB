@@ -22,8 +22,12 @@
 //!   * `JoinCluster` — dynamic membership add.
 //!   * `LeaveCluster` — dynamic membership remove.
 //!
-//! For the prototype, the transport is simulated in-process; production
+//! For this implementation, the transport is simulated in-process; production
 //! would use `tokio` + `tcp` for real network I/O.
+
+pub mod io_uring;
+
+pub use io_uring::{IoUring, IoOp, IoOpType, IoResult, close_raw_fd, open_file_raw};
 
 use std::collections::HashMap;
 use cendb_replication::{NodeId, LogEntry};

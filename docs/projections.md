@@ -14,7 +14,7 @@ projection is a thin layer that:
 |---|---|---|---|
 | **KV** | `(pk_hash i64, key bytes, value bytes)` | In-memory hash | Point-lookup fast path; bypasses planner |
 | **Relational** | User-defined | In-memory PK hash | Columnar scan via `scan_column_i64` |
-| **Document** | Single `bytes` column holding HexDoc | — | O(1) field offset table |
+| **Document** | Single `bytes` column holding CenDoc | — | O(1) field offset table |
 | **Time-Series** | `(ts, series_id, value)` | Per-block zone map | Block-skipping range scans |
 | **Graph** | Nodes block + Edges block | CSR overlay | O(1) neighbor enumeration |
 
@@ -79,9 +79,9 @@ The "columnar projection" benefit of PAX: `scan_column_i64(col_idx)`
 decodes only that column's minipage, skipping the others. A scan over a
 3-column table that only touches one column reads ~1/3 the bytes.
 
-## Document projection (HexDoc)
+## Document projection (CenDoc)
 
-HexDoc is CenDB's binary JSON format with an O(1) field offset table.
+CenDoc is CenDB's binary JSON format with an O(1) field offset table.
 The layout:
 
 ```
@@ -103,7 +103,7 @@ To read `doc["user"]["address"]["city"]` we walk the offset table in
 O(1) per level — no full parse of the document.
 
 ```rust
-use cendb_projection::{DocValue, HexDocBuilder, HexDoc};
+use cendb_projection::{DocValue, CenDocBuilder, CenDoc};
 
 let doc = DocValue::Object(vec![
     ("user".to_string(), DocValue::Object(vec![
@@ -114,8 +114,8 @@ let doc = DocValue::Object(vec![
     ])),
 ]);
 
-let bytes = HexDocBuilder::encode(&doc)?;
-let reader = HexDoc::new(&bytes)?;
+let bytes = CenDocBuilder::encode(&doc)?;
+let reader = CenDoc::new(&bytes)?;
 let city = reader.get_path("user.address.city")?.unwrap();
 // → DocValue::Str("Berlin")
 ```
@@ -127,7 +127,7 @@ The spec calls for adaptive per-collection storage:
   shredded into virtual columns using Dremel-style repetition/definition
   levels.
 - **Blob** (for wild schemas): the document is stored as a compressed
-  HexDoc blob with O(1) field access.
+  CenDoc blob with O(1) field access.
 
 The current implementation provides the Blob strategy; Shredded is
 future work.

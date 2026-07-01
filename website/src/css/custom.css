@@ -1,0 +1,35 @@
+:root {
+  --ifm-color-primary: #6ee7b7;
+  --ifm-color-primary-dark: #34d399;
+  --ifm-color-primary-darker: #10b981;
+  --ifm-color-primary-darkest: #059669;
+  --ifm-color-primary-light: #a7f3d0;
+  --ifm-color-primary-lighter: #d1fae5;
+  --ifm-color-primary-lightest: #ecfdf5;
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #6ee7b7;
+  --ifm-color-primary-dark: #34d399;
+  --ifm-background-color: #0a0a0b;
+  --ifm-background-surface-color: #111114;
+  --ifm-navbar-background-color: #111114;
+  --ifm-sidebar-background-color: #111114;
+}
+
+docusaurus-highlight-code-line {
+  background-color: rgba(110, 231, 183, 0.1);
+  display: block;
+  margin: 0 calc(-1 * var(--ifm-pre-padding));
+  padding: 0 var(--ifm-pre-padding);
+}
+
+.hero__title {
+  background: linear-gradient(135deg, var(--ifm-color-primary), #34d399);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

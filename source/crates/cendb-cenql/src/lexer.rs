@@ -63,6 +63,7 @@ pub enum TokenKind {
 
     // Operators.
     EqEq,   // ==
+    Assign, // = (single equals, for UPDATE SET)
     NotEq,  // !=
     Lt,     // <
     Le,     // <=
@@ -215,7 +216,7 @@ impl<'a> Tokenizer<'a> {
                 if self.peek_at(1) == Some(b'=') {
                     (TokenKind::EqEq, 2)
                 } else {
-                    return Err(LexError::new("expected '==', got single '='", start));
+                    (TokenKind::Assign, 1)
                 }
             }
             b'!' => {

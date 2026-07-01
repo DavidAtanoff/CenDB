@@ -31,7 +31,7 @@ mod art_tests {
         }
         assert_eq!(t.len(), 100);
         for i in 0..100u64 {
-            assert_eq!(t.get(format!("key_{:04}", i).as_bytes()), Some(i));
+            assert_eq!(t.get(format!("key_{:04}", i).as_bytes()), Some(&i));
         }
         // Remove every other key.
         for i in (0..100u64).step_by(2) {
@@ -39,7 +39,7 @@ mod art_tests {
         }
         assert_eq!(t.len(), 50);
         for i in 0..100u64 {
-            let expected = if i % 2 == 0 { None } else { Some(i) };
+            let expected = if i % 2 == 0 { None } else { Some(&i) };
             assert_eq!(t.get(format!("key_{:04}", i).as_bytes()), expected);
         }
     }
@@ -51,8 +51,7 @@ mod art_tests {
             t.insert(format!("k_{:06}", i).as_bytes(), i);
         }
         let results: Vec<(Vec<u8>, u64)> = t
-            .range(b"k_000500", Some(b"k_000600"))
-            .collect();
+            .range(b"k_000500", Some(b"k_000600"));
         assert_eq!(results.len(), 100);
         assert_eq!(results[0].1, 500);
         assert_eq!(results[99].1, 599);
@@ -84,7 +83,7 @@ mod art_tests {
         let insert_elapsed = start.elapsed();
         let start = Instant::now();
         for i in 0..5000u64 {
-            assert_eq!(t.get(format!("k_{:08}", i).as_bytes()), Some(i));
+            assert_eq!(t.get(format!("k_{:08}", i).as_bytes()), Some(&i));
         }
         let lookup_elapsed = start.elapsed();
         println!(
@@ -118,7 +117,7 @@ mod art_tests {
         t.insert(b"k", 1);
         let prev = t.insert(b"k", 2);
         assert_eq!(prev, Some(1));
-        assert_eq!(t.get(b"k"), Some(2));
+        assert_eq!(t.get(b"k"), Some(&2));
         assert_eq!(t.len(), 1);
     }
 }
@@ -251,6 +250,12 @@ mod mvcc_tests {
 
     #[test]
     fn wal_crc_detects_corruption() {
+        // Phase 1 fix: a CRC mismatch is no longer a fatal error that
+        // makes the database unopenable. Instead, it signals "end of
+        // durable log" — `scan_to_end` stops at the first corrupt
+        // record and the database opens successfully with everything
+        // before the corruption intact. This is the standard ARIES
+        // recovery behavior.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.cdb");
         {
@@ -264,9 +269,64 @@ mod mvcc_tests {
             content[20] ^= 0xFF;
             std::fs::write(&path, content).unwrap();
         }
-        // Re-open — scan_to_end should detect CRC mismatch.
-        let result = WriteAheadLog::open(&path, WalConfig::default());
-        assert!(result.is_err(), "expected CRC error on open");
+        // Re-open — should succeed (return Ok), because the corruption
+        // is treated as end-of-log, not a fatal error.
+        let wal = WriteAheadLog::open(&path, WalConfig::default());
+        assert!(wal.is_ok(), "expected open to succeed despite CRC mismatch; got {:?}", wal.err());
+        // read_all should return zero records because the corruption is
+        // in the very first record's header (byte 20 is in the txn_id
+        // field, which is covered by the CRC).
+        let mut wal = wal.unwrap();
+        let records = wal.read_all().unwrap();
+        assert_eq!(records.len(), 0, "expected zero surviving records; got {}", records.len());
+    }
+
+    /// Phase 1 regression test: records BEFORE the corruption must survive
+    /// even when a later record is corrupted. This is the actual ARIES
+    /// recovery guarantee — a single corrupted byte anywhere in the WAL
+    /// must not destroy records that were correctly written before it.
+    #[test]
+    fn wal_records_before_corruption_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let cfg = WalConfig {
+            sync_on_commit: false,
+            sync_on_every_record: false,
+            checkpoint_interval: 0,
+        };
+        {
+            let mut wal = WriteAheadLog::open(&path, cfg.clone()).unwrap();
+            // Write three records, committing each.
+            let lsn1 = wal.append(1, 0, LogRecordType::Insert, PageId(1), b"first").unwrap();
+            wal.commit(1, lsn1).unwrap();
+            let lsn2 = wal.append(2, 0, LogRecordType::Insert, PageId(2), b"second").unwrap();
+            wal.commit(2, lsn2).unwrap();
+            let lsn3 = wal.append(3, 0, LogRecordType::Insert, PageId(3), b"third").unwrap();
+            wal.commit(3, lsn3).unwrap();
+        }
+        // Corrupt a byte in the third record (offset past the first two
+        // records' bytes). Each record is 41 (header+CRC) + payload_len.
+        // Record 1: 41 + 5 = 46 bytes. Commit 1: 41 + 0 = 41 bytes. Total = 87.
+        // Record 2: 41 + 6 = 47 bytes. Commit 2: 41 + 0 = 41 bytes. Total = 175.
+        // Record 3 starts at byte 175.
+        let mut content = std::fs::read(&path).unwrap();
+        // Corrupt byte 180 (5 bytes into record 3's header).
+        if content.len() > 180 {
+            content[180] ^= 0xFF;
+            std::fs::write(&path, content).unwrap();
+        }
+        let mut wal = WriteAheadLog::open(&path, cfg).unwrap();
+        let records = wal.read_all().unwrap();
+        // We expect: record 1 + commit 1 + record 2 + commit 2 = 4 records.
+        // Record 3 and commit 3 are lost to the corruption.
+        assert_eq!(records.len(), 4,
+            "expected 4 surviving records (rec1, commit1, rec2, commit2); got {}",
+            records.len());
+        // Verify the surviving committed txns.
+        let recovery = AriesRecovery::analyze(&records);
+        assert!(recovery.committed_txns.contains(&1), "txn 1 should be recovered as committed");
+        assert!(recovery.committed_txns.contains(&2), "txn 2 should be recovered as committed");
+        assert!(!recovery.committed_txns.contains(&3), "txn 3 should NOT be recovered (corrupted)");
     }
 
     #[test]
@@ -749,106 +809,106 @@ mod buffer_pool_tests {
 
 #[cfg(test)]
 mod ffi_tests {
-    use cendb_core::HexStatus;
+    use cendb_core::CenStatus;
     use std::ffi::CStr;
     use std::ptr;
 
     #[test]
     fn ffi_open_close_roundtrip() {
-        let mut db_ptr: *mut cendb_ffi::HexDb = ptr::null_mut();
+        let mut db_ptr: *mut cendb_ffi::CenDb = ptr::null_mut();
         let cfg = cendb_core::CenDbConfig::default();
-        let status = unsafe { cendb_ffi::hex_open(ptr::null(), &cfg, &mut db_ptr) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_ffi::cendb_open(ptr::null(), &cfg, &mut db_ptr) };
+        assert_eq!(status, CenStatus::Ok);
         assert!(!db_ptr.is_null());
-        let status = unsafe { cendb_ffi::hex_close(db_ptr) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_ffi::cendb_close(db_ptr) };
+        assert_eq!(status, CenStatus::Ok);
     }
 
     #[test]
     fn ffi_kv_put_get_roundtrip() {
-        let mut db_ptr: *mut cendb_ffi::HexDb = ptr::null_mut();
+        let mut db_ptr: *mut cendb_ffi::CenDb = ptr::null_mut();
         let cfg = cendb_core::CenDbConfig::default();
-        unsafe { cendb_ffi::hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_ffi::cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"test_key";
         let val = b"test_value";
         let status = unsafe {
-            cendb_ffi::hex_kv_put(db_ptr, key.as_ptr(), key.len(), val.as_ptr(), val.len())
+            cendb_ffi::cendb_kv_put(db_ptr, key.as_ptr(), key.len(), val.as_ptr(), val.len())
         };
-        assert_eq!(status, HexStatus::Ok);
+        assert_eq!(status, CenStatus::Ok);
 
-        let mut out = cendb_ffi::HexBytes::null();
-        let status = unsafe { cendb_ffi::hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
-        assert_eq!(status, HexStatus::Ok);
+        let mut out = cendb_ffi::CenBytes::null();
+        let status = unsafe { cendb_ffi::cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        assert_eq!(status, CenStatus::Ok);
         assert_eq!(out.as_slice(), val);
 
-        unsafe { cendb_ffi::hex_bytes_free(&mut out) };
-        unsafe { cendb_ffi::hex_close(db_ptr) };
+        unsafe { cendb_ffi::cendb_bytes_free(&mut out) };
+        unsafe { cendb_ffi::cendb_close(db_ptr) };
     }
 
     #[test]
     fn ffi_missing_key_returns_not_found() {
-        let mut db_ptr: *mut cendb_ffi::HexDb = ptr::null_mut();
+        let mut db_ptr: *mut cendb_ffi::CenDb = ptr::null_mut();
         let cfg = cendb_core::CenDbConfig::default();
-        unsafe { cendb_ffi::hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_ffi::cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"nonexistent";
-        let mut out = cendb_ffi::HexBytes::null();
-        let status = unsafe { cendb_ffi::hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
-        assert_eq!(status, HexStatus::ErrNotFound);
+        let mut out = cendb_ffi::CenBytes::null();
+        let status = unsafe { cendb_ffi::cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        assert_eq!(status, CenStatus::ErrNotFound);
         assert!(out.ptr.is_null());
 
-        unsafe { cendb_ffi::hex_close(db_ptr) };
+        unsafe { cendb_ffi::cendb_close(db_ptr) };
     }
 
     #[test]
     fn ffi_last_error_set_on_failure() {
-        let mut db_ptr: *mut cendb_ffi::HexDb = ptr::null_mut();
+        let mut db_ptr: *mut cendb_ffi::CenDb = ptr::null_mut();
         let cfg = cendb_core::CenDbConfig::default();
-        unsafe { cendb_ffi::hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_ffi::cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"missing";
-        let mut out = cendb_ffi::HexBytes::null();
-        let _ = unsafe { cendb_ffi::hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        let mut out = cendb_ffi::CenBytes::null();
+        let _ = unsafe { cendb_ffi::cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
 
-        let msg_ptr = cendb_ffi::hex_last_error_message();
+        let msg_ptr = cendb_ffi::cendb_last_error_message();
         assert!(!msg_ptr.is_null());
         let msg = unsafe { CStr::from_ptr(msg_ptr).to_string_lossy().into_owned() };
         assert!(msg.contains("not found"), "expected 'not found' in error, got: {}", msg);
 
-        unsafe { cendb_ffi::hex_close(db_ptr) };
+        unsafe { cendb_ffi::cendb_close(db_ptr) };
     }
 
     #[test]
     fn ffi_ts_append_and_range() {
-        let mut db_ptr: *mut cendb_ffi::HexDb = ptr::null_mut();
+        let mut db_ptr: *mut cendb_ffi::CenDb = ptr::null_mut();
         let cfg = cendb_core::CenDbConfig::default();
-        unsafe { cendb_ffi::hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_ffi::cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         for ts in 0..100i64 {
-            let status = unsafe { cendb_ffi::hex_ts_append(db_ptr, ts, 1, ts as f64) };
-            assert_eq!(status, HexStatus::Ok);
+            let status = unsafe { cendb_ffi::cendb_ts_append(db_ptr, ts, 1, ts as f64) };
+            assert_eq!(status, CenStatus::Ok);
         }
-        unsafe { cendb_ffi::hex_ts_flush(db_ptr) };
+        unsafe { cendb_ffi::cendb_ts_flush(db_ptr) };
 
         let mut count: u64 = 0;
-        let status = unsafe { cendb_ffi::hex_ts_range_count(db_ptr, 10, 50, &mut count) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_ffi::cendb_ts_range_count(db_ptr, 10, 50, &mut count) };
+        assert_eq!(status, CenStatus::Ok);
         assert!(count > 0, "expected >0 results, got {}", count);
 
-        unsafe { cendb_ffi::hex_close(db_ptr) };
+        unsafe { cendb_ffi::cendb_close(db_ptr) };
     }
 
     #[test]
     fn ffi_null_db_returns_constraint() {
         let status =
-            unsafe { cendb_ffi::hex_kv_put(ptr::null_mut(), ptr::null(), 0, ptr::null(), 0) };
-        assert_eq!(status, HexStatus::ErrConstraint);
+            unsafe { cendb_ffi::cendb_kv_put(ptr::null_mut(), ptr::null(), 0, ptr::null(), 0) };
+        assert_eq!(status, CenStatus::ErrConstraint);
     }
 
     #[test]
     fn ffi_version_is_valid() {
-        let ptr = cendb_ffi::hex_version();
+        let ptr = cendb_ffi::cendb_version();
         assert!(!ptr.is_null());
         let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
         assert!(!s.is_empty());
@@ -861,7 +921,7 @@ mod ffi_tests {
 
 #[cfg(test)]
 mod document_tests {
-    use cendb_projection::{DocValue, HexDoc, HexDocBuilder};
+    use cendb_projection::{DocValue, CenDoc, CenDocBuilder};
 
     #[test]
     fn nested_document_roundtrip() {
@@ -876,8 +936,8 @@ mod document_tests {
             ])),
             ("active".to_string(), DocValue::Bool(true)),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         let city = reader.get_path("user.address.city").unwrap().unwrap();
         match city {
             DocValue::Str(s) => assert_eq!(s, "Berlin"),
@@ -894,8 +954,8 @@ mod document_tests {
                 DocValue::Str("vip".to_string()),
             ])),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         let tags = reader.get_field("tags").unwrap().unwrap();
         match tags {
             DocValue::Array(items) => {
@@ -911,8 +971,8 @@ mod document_tests {
         let doc = DocValue::Object(vec![
             ("name".to_string(), DocValue::Str("Bob".to_string())),
         ]);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
-        let reader = HexDoc::new(&bytes).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
+        let reader = CenDoc::new(&bytes).unwrap();
         assert!(reader.get_field("nonexistent").unwrap().is_none());
     }
 }
@@ -989,7 +1049,7 @@ mod perf_benchmarks {
 
     use cendb_core::{NodeId, SegmentId, Value, ValueKind};
     use cendb_projection::{
-        GraphProjection, HexDocBuilder, KvStore, RelationalTable, TimeSeriesSchema,
+        GraphProjection, CenDocBuilder, KvStore, RelationalTable, TimeSeriesSchema,
         TimeSeriesStore,
     };
     use cendb_storage::header::ColumnSpec;
@@ -1095,7 +1155,7 @@ mod perf_benchmarks {
                     ("city".to_string(), cendb_projection::DocValue::Str(format!("city_{}", i % 50))),
                 ])),
             ]);
-            let bytes = HexDocBuilder::encode(&doc).unwrap();
+            let bytes = CenDocBuilder::encode(&doc).unwrap();
             total_bytes += bytes.len();
         }
         let elapsed = start.elapsed();

@@ -34,7 +34,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use cendb_core::{HexError, HexStatus, PageId};
+use cendb_core::{CenError, CenStatus, PageId};
+
+/// Number of records that must accumulate (across checkpoints) before an
+/// automatic WAL truncation is triggered after a checkpoint. The value
+/// 10_000 is a heuristic: large enough that we don't truncate on every
+/// checkpoint (which would defeat the purpose of batching appends), small
+/// enough that the WAL file doesn't grow unbounded between truncations.
+/// Callers can also trigger truncation explicitly via
+/// [`WriteAheadLog::truncate_to_checkpoint`].
+pub const AUTO_TRUNCATE_THRESHOLD: u64 = 10_000;
 
 // ============================================================================
 // Log record types.
@@ -99,7 +108,18 @@ impl LogRecord {
 
     /// Deserialise from bytes. Returns `(record, bytes_consumed)`.
     pub fn from_bytes(bytes: &[u8]) -> WalResult<(Self, usize)> {
-        if bytes.len() < 33 {
+        // Header layout: 8 (lsn) + 8 (prev_lsn) + 8 (txn_id) + 1 (rec_type)
+        // + 8 (page_id) + 4 (payload_len) = 37 bytes. Plus 4 bytes CRC = 41
+        // bytes for an empty-payload record.
+        //
+        // BUG FIX (Phase 1 fuzzer): the previous check was `< 33`, which
+        // allowed inputs of length 33..36 to proceed past this point and
+        // then panic at the `bytes[33..37]` slice below. A WAL file
+        // truncated to exactly 33-36 bytes (which can happen on a crash
+        // mid-write) would panic the database on recovery. The correct
+        // minimum is 37 bytes (header without CRC) — see the layout
+        // diagram at the top of this file.
+        if bytes.len() < 37 {
             return Err(WalError::TruncatedRecord);
         }
         let lsn = u64::from_le_bytes([
@@ -169,16 +189,16 @@ impl std::fmt::Display for WalError {
 
 impl std::error::Error for WalError {}
 
-impl From<WalError> for HexError {
+impl From<WalError> for CenError {
     fn from(e: WalError) -> Self {
         let status = match e {
-            WalError::Io(_) => HexStatus::ErrIo,
+            WalError::Io(_) => CenStatus::ErrIo,
             WalError::CrcMismatch | WalError::TruncatedRecord | WalError::UnknownRecordType => {
-                HexStatus::ErrCorrupt
+                CenStatus::ErrCorrupt
             }
-            WalError::Other(_) => HexStatus::ErrInternal,
+            WalError::Other(_) => CenStatus::ErrInternal,
         };
-        HexError::new(status, e.to_string())
+        CenError::new(status, e.to_string())
     }
 }
 
@@ -226,6 +246,10 @@ pub struct WriteAheadLog {
     last_record_lsn: u64,
     config: WalConfig,
     records_since_checkpoint: u32,
+    /// Running total of records appended since the last successful
+    /// [`Self::truncate_to_checkpoint`]. Used to decide when to fire an
+    /// automatic truncation after a checkpoint (see [`AUTO_TRUNCATE_THRESHOLD`]).
+    total_appends_since_truncate: u64,
 }
 
 impl WriteAheadLog {
@@ -245,8 +269,15 @@ impl WriteAheadLog {
             last_record_lsn: 0,
             config,
             records_since_checkpoint: 0,
+            total_appends_since_truncate: 0,
         };
         wal.scan_to_end()?;
+        // If the WAL already contains records (we're re-opening an existing
+        // file), make sure the next auto-truncate isn't suppressed just
+        // because we lost the running-total counter across re-opens. We
+        // seed it with the count of records we just scanned so the
+        // threshold logic still fires after a restart.
+        wal.total_appends_since_truncate = wal.last_record_lsn;
         Ok(wal)
     }
 
@@ -264,7 +295,19 @@ impl WriteAheadLog {
                     }
                     cursor += consumed;
                 }
-                Err(WalError::TruncatedRecord) => break,
+                // BUG FIX (Phase 1 crash harness): both TruncatedRecord
+                // and CrcMismatch signal "end of durable log" from the
+                // recovery perspective. The previous code returned
+                // CrcMismatch as a fatal error, which made the entire
+                // database unopenable if any byte in the WAL was
+                // corrupted — even if every record before it was
+                // perfectly intact. The correct ARIES behavior is to
+                // stop scanning at the first damage and recover
+                // everything before it. (UnknownRecordType is also
+                // treated as end-of-log: a partially-written rec_type
+                // byte is indistinguishable from a valid byte we just
+                // don't know about, so we err on the side of stopping.)
+                Err(WalError::TruncatedRecord | WalError::CrcMismatch | WalError::UnknownRecordType) => break,
                 Err(e) => return Err(e),
             }
         }
@@ -303,6 +346,7 @@ impl WriteAheadLog {
         self.next_lsn += 1;
         self.last_record_lsn = lsn;
         self.records_since_checkpoint += 1;
+        self.total_appends_since_truncate = self.total_appends_since_truncate.saturating_add(1);
         if self.config.checkpoint_interval > 0
             && self.records_since_checkpoint >= self.config.checkpoint_interval
         {
@@ -327,6 +371,12 @@ impl WriteAheadLog {
     }
 
     /// Write a checkpoint record and fsync.
+    ///
+    /// After writing the checkpoint, if [`AUTO_TRUNCATE_THRESHOLD`] records
+    /// have been appended since the last truncation, automatically invoke
+    /// [`Self::truncate_to_checkpoint`] to reclaim the space occupied by
+    /// pre-checkpoint records. This keeps the WAL file bounded over time
+    /// without requiring callers to remember to truncate manually.
     pub fn checkpoint(&mut self) -> WalResult<u64> {
         let lsn = self.append(
             0,
@@ -337,10 +387,24 @@ impl WriteAheadLog {
         )?;
         self.file.sync_data()?;
         self.records_since_checkpoint = 0;
+        // Auto-truncate if we've accumulated enough records since the last
+        // truncation. We do this *after* the sync so the checkpoint record
+        // itself is durable before we discard the older records.
+        if self.total_appends_since_truncate >= AUTO_TRUNCATE_THRESHOLD {
+            // truncate_to_checkpoint resets total_appends_since_truncate
+            // on success. On error we leave the counter alone so the next
+            // checkpoint will retry.
+            let _ = self.truncate_to_checkpoint()?;
+        }
         Ok(lsn)
     }
 
     /// Read all records from the log (used by recovery).
+    ///
+    /// Stops at the first `TruncatedRecord`, `CrcMismatch`, or
+    /// `UnknownRecordType` — these all signal "end of durable log" from
+    /// the recovery perspective. Records collected before the damage
+    /// are returned. See `scan_to_end` for the rationale.
     pub fn read_all(&mut self) -> WalResult<Vec<LogRecord>> {
         let mut buf = Vec::new();
         self.file.seek(SeekFrom::Start(0))?;
@@ -353,19 +417,126 @@ impl WriteAheadLog {
                     records.push(rec);
                     cursor += consumed;
                 }
-                Err(WalError::TruncatedRecord) => break,
+                Err(WalError::TruncatedRecord | WalError::CrcMismatch | WalError::UnknownRecordType) => break,
                 Err(e) => return Err(e),
             }
         }
         Ok(records)
     }
 
-    /// Truncate the log (used after a checkpoint to reclaim space; for the
-    /// prototype this is a no-op — checkpoints just mark a low-water mark).
+    /// Truncate the log to the last checkpoint (reclaim space).
+    ///
+    /// This is a thin wrapper around [`Self::truncate_to_checkpoint`] that
+    /// preserves the original `WalResult<()>` signature for backward
+    /// compatibility. The number of bytes reclaimed is discarded.
     pub fn truncate(&mut self) -> WalResult<()> {
-        // For the prototype we don't actually truncate. A production WAL
-        // would archive records < the last checkpoint LSN.
+        let _ = self.truncate_to_checkpoint()?;
         Ok(())
+    }
+
+    /// Reclaim space by discarding all records before the last `Checkpoint`
+    /// record.
+    ///
+    /// ARIES recovery only ever needs to scan from the last checkpoint
+    /// onward (the ANALYSIS pass starts there), so everything older is
+    /// dead weight. This method:
+    ///
+    /// 1. Reads every record currently in the WAL.
+    /// 2. Finds the highest-LSN `Checkpoint` record.
+    /// 3. Keeps that checkpoint plus every record that came after it.
+    /// 4. Writes the survivors to a sibling temp file, `fsync`s it, then
+    ///    atomically renames it over the live WAL file (crash-safe).
+    /// 5. Re-opens the file handle so future appends go to the renamed
+    ///    (truncated) file.
+    ///
+    /// Returns the number of bytes reclaimed (old file size − new file
+    /// size). If there is no checkpoint record in the log, the WAL is left
+    /// untouched and `0` is returned — the caller should checkpoint first.
+    ///
+    /// # Crash safety
+    ///
+    /// The temp file is fully written and `fsync`'d *before* the atomic
+    /// rename, so a crash at any point leaves either the old log intact
+    /// (rename hadn't happened) or the new truncated log durable (rename
+    /// had happened and the new file was already fsync'd).
+    pub fn truncate_to_checkpoint(&mut self) -> WalResult<u64> {
+        // 1. Read every record currently in the file.
+        let records = self.read_all()?;
+        let original_size = self.file.metadata()?.len();
+
+        // 2. Find the highest-LSN Checkpoint record. Records strictly before
+        //    it are reclaimable — ARIES ANALYSIS starts at the last checkpoint.
+        let last_cp_idx = records
+            .iter()
+            .rposition(|r| r.rec_type == LogRecordType::Checkpoint);
+        let Some(idx) = last_cp_idx else {
+            // No checkpoint recorded — nothing to truncate (the caller
+            // should call `checkpoint()` first).
+            return Ok(0);
+        };
+
+        // If the checkpoint is the very first record, everything is already
+        // post-checkpoint; nothing to reclaim.
+        if idx == 0 {
+            return Ok(0);
+        }
+
+        // 3. Serialise survivors (checkpoint + everything after) to a temp
+        //    file in the same directory (so the rename is atomic on the
+        //    same filesystem).
+        let tmp_path: PathBuf = format!("{}.tmp", self.path.display()).into();
+        // Remove any stale temp file from a previous failed run.
+        let _ = std::fs::remove_file(&tmp_path);
+        {
+            let mut tmp = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            for rec in &records[idx..] {
+                tmp.write_all(&rec.to_bytes())?;
+            }
+            // Make sure the new content hits disk before the rename.
+            tmp.sync_data()?;
+            // Drop `tmp` so its file handle closes before we rename.
+        }
+
+        // 4. Close the current file handle BEFORE the rename.
+        //    On Windows, std::fs::rename fails if the destination file
+        //    has an open handle. We replace the file handle with a
+        //    handle to a temp file (which we immediately close), then
+        //    re-open the real file after the rename.
+        let dummy_path = self.path.with_extension("dummy");
+        {
+            let _dummy = OpenOptions::new().create(true).write(true).truncate(true).open(&dummy_path)?;
+            // self.file is replaced with the dummy handle; the old
+            // handle to the WAL is dropped, closing it.
+            self.file = _dummy;
+        }
+        // Remove the dummy file.
+        let _ = std::fs::remove_file(&dummy_path);
+
+        // 5. Atomically replace the live WAL with the truncated version.
+        std::fs::rename(&tmp_path, &self.path)?;
+
+        // 6. Re-open the file handle on the truncated file.
+        let new_file = OpenOptions::new()
+            .append(true)
+            .read(true)
+            .open(&self.path)?;
+        self.file = new_file;
+
+        // 6. Seek to end so the next append goes after the survivors.
+        self.file.seek(SeekFrom::End(0))?;
+
+        let new_size = self.file.metadata()?.len();
+        let reclaimed = original_size.saturating_sub(new_size);
+
+        // Reset the running total so the next auto-truncate fires after
+        // another `AUTO_TRUNCATE_THRESHOLD` records, not sooner.
+        self.total_appends_since_truncate = 0;
+
+        Ok(reclaimed)
     }
 
     /// Path of the WAL file.
@@ -376,6 +547,17 @@ impl WriteAheadLog {
     /// Next LSN that will be assigned.
     pub fn next_lsn(&self) -> u64 {
         self.next_lsn
+    }
+
+    /// Number of records appended since the last successful
+    /// [`Self::truncate_to_checkpoint`]. Exposed for tests and observability.
+    pub fn appends_since_truncate(&self) -> u64 {
+        self.total_appends_since_truncate
+    }
+
+    /// Current on-disk size of the WAL file in bytes.
+    pub fn file_size(&self) -> WalResult<u64> {
+        Ok(self.file.metadata()?.len())
     }
 }
 
@@ -509,6 +691,37 @@ mod tests {
         assert_ne!(a, crc32c(b"hello, world!"));
     }
 
+    /// Regression: Phase 1 fuzzer found that `from_bytes` panicked on
+    /// inputs of length 33..=36 because the header check was `< 33`
+    /// but the next read accesses `bytes[33..37]`. A WAL truncated to
+    /// exactly 33-36 bytes can occur on a crash mid-write and must not
+    /// panic the recovery path.
+    #[test]
+    fn from_bytes_does_not_panic_on_33_to_36_byte_inputs() {
+        for len in 0..=128usize {
+            let bytes = vec![0u8; len];
+            // Must return Err, not panic.
+            let _ = LogRecord::from_bytes(&bytes);
+        }
+    }
+
+    #[test]
+    fn from_bytes_rejects_random_short_inputs() {
+        // Property: no input of any length should cause a panic.
+        let mut rng_state = 0xCAFEBABEu64;
+        let mut next = || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+        for _ in 0..10_000 {
+            let len = (next() % 256) as usize;
+            let bytes: Vec<u8> = (0..len).map(|_| (next() & 0xFF) as u8).collect();
+            let _ = LogRecord::from_bytes(&bytes); // must not panic
+        }
+    }
+
     #[test]
     fn log_record_roundtrip() {
         let rec = LogRecord {
@@ -637,5 +850,310 @@ mod tests {
         let records = wal.read_all().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[1].rec_type, LogRecordType::Checkpoint);
+    }
+
+    // ========================================================================
+    // WAL truncation tests (Fix 1: reclaim space after checkpoint).
+    // ========================================================================
+
+    /// Helper: a `WalConfig` with auto-checkpoint disabled, so the test
+    /// controls exactly when checkpoints fire (avoids the auto-checkpoint
+    /// recursion footgun in the legacy `append` path).
+    fn manual_config() -> WalConfig {
+        WalConfig {
+            sync_on_commit: false,
+            sync_on_every_record: false,
+            checkpoint_interval: 0,
+        }
+    }
+
+    /// `truncate_to_checkpoint` with no checkpoint record in the log should
+    /// be a no-op (return 0, leave the file untouched).
+    #[test]
+    fn truncate_is_noop_without_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        for i in 0..10u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"row")
+                .unwrap();
+        }
+        let size_before = wal.file_size().unwrap();
+        let reclaimed = wal.truncate_to_checkpoint().unwrap();
+        assert_eq!(reclaimed, 0, "no checkpoint → nothing to reclaim");
+        let size_after = wal.file_size().unwrap();
+        assert_eq!(size_before, size_after);
+        // All records must still be present.
+        let records = wal.read_all().unwrap();
+        assert_eq!(records.len(), 10);
+    }
+
+    /// The headline behaviour: write 1000 records, checkpoint, write 1000
+    /// more, truncate, and verify (a) the file shrank, (b) only the
+    /// checkpoint-and-after records survive, (c) ARIES recovery still
+    /// identifies the committed txn.
+    #[test]
+    fn truncate_after_checkpoint_reclaims_space_and_preserves_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+
+        // Phase A: 1000 inserts + commit + checkpoint.
+        let mut prev = 0u64;
+        for i in 0..1000u64 {
+            prev = wal
+                .append(1, prev, LogRecordType::Insert, PageId(i), b"row")
+                .unwrap();
+        }
+        wal.commit(1, prev).unwrap();
+        wal.checkpoint().unwrap();
+
+        // Phase B: 1000 more inserts for a *different* (uncommitted) txn.
+        let mut prev2 = 0u64;
+        for i in 0..1000u64 {
+            prev2 = wal
+                .append(2, prev2, LogRecordType::Insert, PageId(i), b"row2")
+                .unwrap();
+        }
+
+        let size_before = wal.file_size().unwrap();
+        let reclaimed = wal.truncate_to_checkpoint().unwrap();
+        let size_after = wal.file_size().unwrap();
+
+        assert!(
+            reclaimed > 0,
+            "expected to reclaim some bytes, got {}",
+            reclaimed
+        );
+        assert!(
+            size_after < size_before,
+            "file should have shrunk: before={} after={}",
+            size_before,
+            size_after
+        );
+        // Sanity bound: we should have reclaimed at least ~half the file
+        // (we dropped ~1000 records out of ~2001).
+        assert!(
+            reclaimed > size_before / 4,
+            "reclaimed {} should be > size_before/4 = {}",
+            reclaimed,
+            size_before / 4
+        );
+
+        // Survivors: checkpoint + 1000 inserts = 1001 records.
+        let records = wal.read_all().unwrap();
+        assert_eq!(records.len(), 1001, "survivor count mismatch");
+        assert_eq!(records[0].rec_type, LogRecordType::Checkpoint);
+        assert_eq!(records[1].rec_type, LogRecordType::Insert);
+
+        // ARIES analysis: txn 1 committed (its Commit was pre-checkpoint
+        // and thus discarded — but the recovery can no longer see it,
+        // so txn 1 is not in the committed set). Txn 2's inserts are
+        // all present with no Commit → txn 2 is a loser. This is the
+        // correct ARIES behaviour after a truncation: any txn whose
+        // Commit preceded the checkpoint is by definition durable and
+        // does not need redo (its effects are already on the data pages).
+        let recovery = AriesRecovery::analyze(&records);
+        assert!(
+            !recovery.committed_txns.contains(&1),
+            "txn 1's commit was pre-checkpoint and is no longer in the log"
+        );
+        assert!(
+            recovery.loser_txns.contains(&2),
+            "txn 2 is in-flight (no commit) and should be a loser"
+        );
+    }
+
+    /// After truncation, the WAL must still accept new appends and they
+    /// must be readable on re-open. This guards against the classic "we
+    /// forgot to re-seek / re-open the file handle" bug.
+    #[test]
+    fn truncate_then_append_then_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+
+        for i in 0..50u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"row")
+                .unwrap();
+        }
+        wal.checkpoint().unwrap();
+        let reclaimed = wal.truncate_to_checkpoint().unwrap();
+        assert!(reclaimed > 0);
+
+        // Append more records *after* the truncation. They must land at
+        // the end of the (truncated) file, not the end of the original.
+        let lsn_after = wal
+            .append(3, 0, LogRecordType::Insert, PageId(999), b"after")
+            .unwrap();
+        wal.commit(3, lsn_after).unwrap();
+
+        // Re-open from disk and verify the full survivor chain.
+        let mut wal2 = WriteAheadLog::open(&path, manual_config()).unwrap();
+        let records = wal2.read_all().unwrap();
+        // 1 checkpoint + 1 insert + 1 commit (the pre-checkpoint inserts
+        // were discarded).
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].rec_type, LogRecordType::Checkpoint);
+        assert_eq!(records[1].rec_type, LogRecordType::Insert);
+        assert_eq!(records[1].payload, b"after");
+        assert_eq!(records[2].rec_type, LogRecordType::Commit);
+
+        // next_lsn must continue from where we left off, not restart.
+        assert!(wal2.next_lsn() > lsn_after);
+    }
+
+    /// `truncate()` (the legacy signature) should behave identically to
+    /// `truncate_to_checkpoint()` — it just discards the byte count.
+    #[test]
+    fn legacy_truncate_delegates_to_truncate_to_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        for i in 0..20u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"x")
+                .unwrap();
+        }
+        wal.checkpoint().unwrap();
+        let size_before = wal.file_size().unwrap();
+        wal.truncate().unwrap();
+        let size_after = wal.file_size().unwrap();
+        assert!(size_after < size_before);
+    }
+
+    /// When the last record in the log is itself a Checkpoint (i.e. there
+    /// are no post-checkpoint records), truncation should still work and
+    /// leave just the checkpoint behind.
+    #[test]
+    fn truncate_when_checkpoint_is_last_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        for i in 0..100u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"row")
+                .unwrap();
+        }
+        wal.checkpoint().unwrap();
+        let reclaimed = wal.truncate_to_checkpoint().unwrap();
+        assert!(reclaimed > 0);
+        let records = wal.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].rec_type, LogRecordType::Checkpoint);
+    }
+
+    /// `truncate_to_checkpoint` should be idempotent: calling it twice in
+    /// a row reclaims zero bytes the second time (the checkpoint is now
+    /// the first record).
+    #[test]
+    fn truncate_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        for i in 0..50u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"row")
+                .unwrap();
+        }
+        wal.checkpoint().unwrap();
+        let first = wal.truncate_to_checkpoint().unwrap();
+        let second = wal.truncate_to_checkpoint().unwrap();
+        assert!(first > 0);
+        assert_eq!(second, 0, "second truncate should reclaim nothing");
+    }
+
+    /// Auto-truncate: after `AUTO_TRUNCATE_THRESHOLD` records accumulate,
+    /// a manual `checkpoint()` call should fire the truncation
+    /// automatically. We disable auto-checkpoint (`checkpoint_interval: 0`)
+    /// so we control exactly when the checkpoint fires, then write enough
+    /// records to cross the threshold.
+    #[test]
+    fn auto_truncate_fires_after_threshold_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+
+        // Write AUTO_TRUNCATE_THRESHOLD records (no checkpoints yet).
+        for i in 0..AUTO_TRUNCATE_THRESHOLD {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i as u64), b"r")
+                .unwrap();
+        }
+        assert!(
+            wal.appends_since_truncate() >= AUTO_TRUNCATE_THRESHOLD,
+            "counter should be >= threshold before checkpoint"
+        );
+
+        let size_before_checkpoint = wal.file_size().unwrap();
+        // This checkpoint should auto-fire truncate_to_checkpoint.
+        wal.checkpoint().unwrap();
+        let size_after_checkpoint = wal.file_size().unwrap();
+
+        // The checkpoint append itself added a few bytes, but the
+        // truncation should have discarded the AUTO_TRUNCATE_THRESHOLD
+        // pre-checkpoint inserts — a net shrink.
+        assert!(
+            size_after_checkpoint < size_before_checkpoint,
+            "auto-truncate should have shrunk the file: before={} after={}",
+            size_before_checkpoint,
+            size_after_checkpoint
+        );
+
+        // The counter must be reset.
+        assert_eq!(
+            wal.appends_since_truncate(),
+            0,
+            "auto-truncate should reset the counter"
+        );
+
+        // The file should contain only the checkpoint record.
+        let records = wal.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].rec_type, LogRecordType::Checkpoint);
+    }
+
+    /// Auto-truncate must NOT fire below the threshold — checkpoints
+    /// should remain cheap when the log is small.
+    #[test]
+    fn auto_truncate_does_not_fire_below_threshold() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        for i in 0..100u64 {
+            wal.append(1, 0, LogRecordType::Insert, PageId(i), b"r")
+                .unwrap();
+        }
+        let size_before = wal.file_size().unwrap();
+        wal.checkpoint().unwrap();
+        let size_after = wal.file_size().unwrap();
+        // File should have *grown* by exactly one checkpoint record (~41
+        // bytes), not shrunk.
+        assert!(
+            size_after > size_before,
+            "no auto-truncate expected below threshold: before={} after={}",
+            size_before,
+            size_after
+        );
+        // Counter still tracks the 100 inserts + 1 checkpoint.
+        assert_eq!(wal.appends_since_truncate(), 101);
+    }
+
+    /// Re-opening a WAL that already contains records must seed the
+    /// auto-truncate counter so the threshold logic still works after a
+    /// restart. (Otherwise a long-lived WAL that survived a process
+    /// restart would never auto-truncate.)
+    #[test]
+    fn reopen_seeds_appends_since_truncate_counter() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wal.cdb");
+        {
+            let mut wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+            for i in 0..100u64 {
+                wal.append(1, 0, LogRecordType::Insert, PageId(i), b"r")
+                    .unwrap();
+            }
+        }
+        // Re-open: the counter should be seeded with the highest LSN we
+        // saw during scan (== 100). This is approximate by design — we
+        // don't persist the counter, so we estimate it from the LSN.
+        let wal = WriteAheadLog::open(&path, manual_config()).unwrap();
+        assert_eq!(wal.appends_since_truncate(), 100);
     }
 }

@@ -21,7 +21,10 @@ pub mod encoding;
 pub mod header;
 pub mod pax;
 pub mod segment;
+pub mod simd_bits;
 pub mod zerocopy;
+
+pub use simd_bits::{pack_simd, unpack_simd};
 
 pub use encoding::{Encoding, EncodingCodec};
 pub use header::{BlockHeader, ColumnDirectory, ColumnSpec, SegmentHeader};

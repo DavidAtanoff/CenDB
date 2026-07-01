@@ -40,4 +40,4 @@ pub use lru::LruK;
 pub use pool::{BufferPool, InMemoryPageSource, PageSource, PinnedPage, PoolStats, ReadHint};
 
 #[cfg(feature = "mmap")]
-pub use mmap::MmapPageSource;
+pub use mmap::{MmapPageSource, MmapSegmentReader};

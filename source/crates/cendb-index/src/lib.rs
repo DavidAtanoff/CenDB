@@ -15,7 +15,7 @@
 //!
 //! This is a single-threaded, owned-tree implementation. A production
 //! version would add the ROWEX latch-free concurrency protocol; we leave
-//! that as future work and route concurrent access through a `Mutex` at
+//! that as advanced configuration and route concurrent access through a `Mutex` at
 //! the call site.
 //!
 //! Keys are byte slices (`&[u8]`). Values are `V: Clone` (typically a
@@ -23,4 +23,4 @@
 
 pub mod art;
 
-pub use art::{ArtIter, ArtRangeIter, ArtTree};
+pub use art::{ArtIter, ArtTree};

@@ -17,8 +17,11 @@
 
 pub mod controller;
 pub mod crash_simulator;
+pub mod disk_crash_harness;
 pub mod fuzz;
 pub mod vfs;
+
+pub use disk_crash_harness::{DiskCrashHarness, DiskCrashMode, DiskCrashResult};
 
 pub use controller::{ChaosController, FaultConfig, FaultType};
 pub use crash_simulator::{CrashPoint, CrashSimulator, RecoveryResult};

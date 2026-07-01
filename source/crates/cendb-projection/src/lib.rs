@@ -11,7 +11,7 @@
 //!
 //!   * [`kv`] — Key-Value fast path (point lookup).
 //!   * [`relational`] — schema-bound tuples.
-//!   * [`document`] — HexDoc binary JSON layout with field offset table.
+//!   * [`document`] — CenDoc binary JSON layout with field offset table.
 //!   * [`timeseries`] — time-partitioned blocks with zone-map skipping.
 //!   * [`graph`] — CSR (Compressed Sparse Row) overlay for O(1) adjacency.
 
@@ -22,8 +22,8 @@ pub mod relational;
 pub mod timeseries;
 
 // Re-export the most useful types.
-pub use document::{DocValue, HexDoc, HexDocBuilder};
+pub use document::{DocValue, CenDoc, CenDocBuilder};
 pub use graph::{CsrOverlay, GraphProjection};
-pub use kv::{KvProjection, KvStore};
+pub use kv::{CompactionStats, KvProjection, KvStore};
 pub use relational::{RelationalProjection, RelationalTable};
 pub use timeseries::{TimeSeriesProjection, TimeSeriesSchema, TimeSeriesStore};

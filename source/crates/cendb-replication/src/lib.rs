@@ -1,17 +1,34 @@
-//! cendb-replication: lightweight Raft-like consensus for P2P replication.
+//! cendb-replication: replication and HA for CenDB.
 //!
-//! ## Design
+//! Two complementary mechanisms:
 //!
-//! A simplified Raft implementation for multi-node data synchronization:
-//!   * **Leader election** — nodes vote for a leader; the leader serves
-//!     all writes.
-//!   * **Log replication** — the leader appends entries to its log and
-//!     replicates to followers.
-//!   * **Safety** — an entry is committed once a majority of followers
-//!     acknowledge it.
+//!   * **Raft consensus** (`RaftNode` / `RaftCluster`) — for
+//!     multi-node clusters that need strong consistency. Single-process
+//!     simulation; production use would add a network transport.
+//!   * **WAL shipping** (`wal_shipping::WalShipper`) — the recommended
+//!     HA story for embedded deployments. Ships WAL segments to a
+//!     replica directory or S3 staging area; a replica process applies
+//!     them via ARIES recovery.
 //!
-//! This is a single-process simulation of a multi-node cluster; in
-//! production, nodes would communicate over a network.
+//! ## When to use which
+//!
+//! Use **WAL shipping** when:
+//!   - You have a single embedded CenDB instance and want disaster
+//!     recovery.
+//!   - You can tolerate bounded RPO (one transaction with `OnCommit`,
+//!     up to N seconds with `Interval`).
+//!   - You don't need automatic failover (external orchestration is OK).
+//!
+//! Use **Raft** when:
+//!   - You need automatic failover and strong consistency.
+//!   - You can deploy multiple CenDB instances with a network
+//!     transport between them.
+//!   - You can accept the complexity of a consensus protocol.
+
+pub mod tcp_transport;
+pub mod wal_shipping;
+
+pub use tcp_transport::{FailoverManager, RaftMessage, ReadRouter, TcpTransport};
 
 use std::collections::HashMap;
 
@@ -19,7 +36,7 @@ use std::collections::HashMap;
 pub type NodeId = u64;
 
 /// Log entry: a replicated command.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,

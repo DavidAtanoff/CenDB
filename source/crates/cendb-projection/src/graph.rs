@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use cendb_core::{BlockId, HexError, HexResult, NodeId, SegmentId, Value, ValueKind};
+use cendb_core::{BlockId, CenError, CenResult, NodeId, SegmentId, Value, ValueKind};
 use cendb_storage::header::ColumnSpec;
 use cendb_storage::pax::{PaxBlock, PaxBlockBuilder};
 
@@ -149,7 +149,7 @@ impl GraphProjection {
     }
 
     /// Flush pending nodes and edges into PAX blocks.
-    pub fn flush(&mut self) -> HexResult<()> {
+    pub fn flush(&mut self) -> CenResult<()> {
         if !self.pending_nodes.is_empty() {
             let specs = node_specs();
             let mut builder = PaxBlockBuilder::new(self.block_size, specs)?;
@@ -182,14 +182,14 @@ impl GraphProjection {
     }
 
     /// Build (or rebuild) the CSR overlay from the edges block.
-    pub fn build_csr(&mut self) -> HexResult<&CsrOverlay> {
+    pub fn build_csr(&mut self) -> CenResult<&CsrOverlay> {
         if self.csr.is_some() {
             return Ok(self.csr.as_ref().unwrap());
         }
         let block = self
             .edges_block
             .as_ref()
-            .ok_or_else(|| HexError::constraint("build_csr: no edges block (call flush first)"))?;
+            .ok_or_else(|| CenError::constraint("build_csr: no edges block (call flush first)"))?;
         let src_vals = block.decode_i64_column(0)?;
         let dst_vals = block.decode_i64_column(1)?;
         let mut edges: Vec<(NodeId, NodeId, (BlockId, u32))> = Vec::with_capacity(src_vals.len());
@@ -201,21 +201,21 @@ impl GraphProjection {
     }
 
     /// 1-hop traversal: return the out-neighbors of `node`.
-    pub fn neighbors(&self, node: NodeId) -> HexResult<Vec<NodeId>> {
+    pub fn neighbors(&self, node: NodeId) -> CenResult<Vec<NodeId>> {
         let csr = self
             .csr
             .as_ref()
-            .ok_or_else(|| HexError::constraint("neighbors: CSR not built (call build_csr first)"))?;
+            .ok_or_else(|| CenError::constraint("neighbors: CSR not built (call build_csr first)"))?;
         Ok(csr.neighbors(node).to_vec())
     }
 
     /// 2-hop traversal: return all nodes reachable from `start` in exactly
     /// 2 hops. Used by the verification suite.
-    pub fn two_hop(&self, start: NodeId) -> HexResult<Vec<NodeId>> {
+    pub fn two_hop(&self, start: NodeId) -> CenResult<Vec<NodeId>> {
         let csr = self
             .csr
             .as_ref()
-            .ok_or_else(|| HexError::constraint("two_hop: CSR not built"))?;
+            .ok_or_else(|| CenError::constraint("two_hop: CSR not built"))?;
         let mut out = Vec::new();
         let first_hop = csr.neighbors(start).to_vec();
         for &n1 in &first_hop {
@@ -233,11 +233,11 @@ impl GraphProjection {
 
     /// BFS up to `max_depth` hops from `start`. Returns (depth, node_id)
     /// pairs.
-    pub fn bfs(&self, start: NodeId, max_depth: usize) -> HexResult<Vec<(usize, NodeId)>> {
+    pub fn bfs(&self, start: NodeId, max_depth: usize) -> CenResult<Vec<(usize, NodeId)>> {
         let csr = self
             .csr
             .as_ref()
-            .ok_or_else(|| HexError::constraint("bfs: CSR not built"))?;
+            .ok_or_else(|| CenError::constraint("bfs: CSR not built"))?;
         let mut visited: HashMap<u64, usize> = HashMap::new();
         visited.insert(start.0, 0);
         let mut frontier: Vec<NodeId> = vec![start];

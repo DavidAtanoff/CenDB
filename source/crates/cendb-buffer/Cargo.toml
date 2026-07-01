@@ -7,7 +7,7 @@ authors.workspace = true
 description = "CenDB buffer pool: user-space frames, LRU-K eviction, pinned-page guards"
 
 [features]
-default = []
+default = ["mmap"]
 # Enable mmap-backed read-only page source for tiny, read-mostly KV
 # deployments where binary minimalism trumps control. See §3.1 of the spec.
 mmap = ["dep:memmap2"]

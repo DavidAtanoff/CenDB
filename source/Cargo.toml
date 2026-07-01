@@ -24,6 +24,7 @@ members = [
     "crates/cendb-system",
     "crates/cendb-net",
     "crates/cendb-ffi",
+    "crates/cendb-rdf",
     "crates/cendb",
 ]
 

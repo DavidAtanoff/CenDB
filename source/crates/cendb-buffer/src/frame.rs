@@ -45,7 +45,7 @@ impl Frame {
     /// Allocate a fresh frame with no page cached. The underlying buffer is
     /// zeroed; reads will see zeros until the buffer pool fills it with real
     /// page bytes from disk.
-    pub fn new(frame_id: FrameId, page_size: usize) -> cendb_core::HexResult<Self> {
+    pub fn new(frame_id: FrameId, page_size: usize) -> cendb_core::CenResult<Self> {
         let data = AlignedBlock::zeroed(page_size)?;
         Ok(Self {
             data,

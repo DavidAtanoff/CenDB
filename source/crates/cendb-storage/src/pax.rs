@@ -29,7 +29,7 @@
 //! the final buffer (which would require knowing minipage sizes up front) and
 //! is also faster — the final write is a sequential memcpy per column.
 
-use cendb_core::{HexError, HexResult, Value, ValueKind, MINIPAGE_ALIGN};
+use cendb_core::{CenError, CenResult, Value, ValueKind, MINIPAGE_ALIGN};
 use bytemuck::Pod;
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
@@ -65,9 +65,9 @@ impl<'a, T: Pod> ColumnView<'a, T> {
     /// # Safety invariants enforced
     /// The constructor checks the length invariant at runtime (in debug
     /// builds, alignment too). On mismatched length it returns `Err`.
-    pub fn new(raw: &'a [u8]) -> HexResult<Self> {
+    pub fn new(raw: &'a [u8]) -> CenResult<Self> {
         if raw.len() % core::mem::size_of::<T>() != 0 {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "ColumnView: slice len {} not a multiple of size_of::<{}>() = {}",
                 raw.len(),
                 core::any::type_name::<T>(),
@@ -143,15 +143,15 @@ impl PaxBlockBuilder {
     /// column specs. The specs must be in a stable order; column id values
     /// may be arbitrary but their position in the slice is what determines
     /// their index in the column directory.
-    pub fn new(block_size: u32, specs: Vec<ColumnSpec>) -> HexResult<Self> {
+    pub fn new(block_size: u32, specs: Vec<ColumnSpec>) -> CenResult<Self> {
         if specs.is_empty() {
-            return Err(HexError::constraint("PaxBlockBuilder: need >= 1 column"));
+            return Err(CenError::constraint("PaxBlockBuilder: need >= 1 column"));
         }
         if specs.iter().filter(|s| s.is_pk != 0).count() > 1 {
-            return Err(HexError::constraint("PaxBlockBuilder: at most one pk column"));
+            return Err(CenError::constraint("PaxBlockBuilder: at most one pk column"));
         }
         if specs.iter().filter(|s| s.is_ts != 0).count() > 1 {
-            return Err(HexError::constraint("PaxBlockBuilder: at most one ts column"));
+            return Err(CenError::constraint("PaxBlockBuilder: at most one ts column"));
         }
         let staging = specs
             .iter()
@@ -174,9 +174,9 @@ impl PaxBlockBuilder {
     /// column specs passed to [`new`]. Each value's kind must be compatible
     /// with the column's declared kind (`Null` is always accepted and
     /// recorded in the null bitmap).
-    pub fn append_row(&mut self, values: &[Value]) -> HexResult<RowId> {
+    pub fn append_row(&mut self, values: &[Value]) -> CenResult<RowId> {
         if values.len() != self.specs.len() {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "append_row: expected {} values, got {}",
                 self.specs.len(),
                 values.len()
@@ -190,7 +190,7 @@ impl PaxBlockBuilder {
         Ok(row_id)
     }
 
-    fn write_value(&mut self, col_idx: usize, v: &Value) -> HexResult<()> {
+    fn write_value(&mut self, col_idx: usize, v: &Value) -> CenResult<()> {
         // Snapshot the column flags up-front so we don't hold an immutable
         // borrow of `self.specs` while we mutate `self` (zone map fields).
         let spec = &self.specs[col_idx];
@@ -240,7 +240,7 @@ impl PaxBlockBuilder {
                     (ValueKind::Timestamp, Value::Timestamp(x)) => *x,
                     (ValueKind::I64, Value::Timestamp(x)) => *x, // accept ts as i64
                     (k, val) => {
-                        return Err(HexError::constraint(format!(
+                        return Err(CenError::constraint(format!(
                             "append_row: cannot store {:?} in column of kind {:?}",
                             val, k
                         )));
@@ -301,7 +301,7 @@ impl PaxBlockBuilder {
     /// Finalize the block: lay out the staging buffers into a single
     /// `block_size`-byte buffer with all minipages 64-byte aligned, populate
     /// the column directory, and compute zone maps.
-    pub fn finalize(self) -> HexResult<PaxBlock> {
+    pub fn finalize(self) -> CenResult<PaxBlock> {
         let column_count = self.specs.len() as u32;
         let minipages_off = minipages_offset_after_directory(self.specs.len()) as u32;
 
@@ -409,7 +409,7 @@ impl PaxBlockBuilder {
         let tombstone_bitmap_size = (self.row_count as usize + 7) / 8;
         let total_needed = varheap_off as usize + varheap.len() + null_bitmap_size + tombstone_bitmap_size;
         if total_needed > self.block_size as usize {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "PaxBlockBuilder: block overflow — need {} bytes, block size is {}",
                 total_needed, self.block_size
             )));
@@ -490,17 +490,17 @@ unsafe impl Sync for AlignedBlock {}
 
 impl AlignedBlock {
     /// Allocate a zeroed buffer of `size` bytes, 64-byte aligned.
-    pub fn zeroed(size: usize) -> HexResult<Self> {
+    pub fn zeroed(size: usize) -> CenResult<Self> {
         if size == 0 {
-            return Err(HexError::constraint("AlignedBlock: size must be > 0"));
+            return Err(CenError::constraint("AlignedBlock: size must be > 0"));
         }
         let layout = Layout::from_size_align(size, MINIPAGE_ALIGN)
-            .map_err(|e| HexError::internal(format!("layout error: {}", e)))?;
+            .map_err(|e| CenError::internal(format!("layout error: {}", e)))?;
         // SAFETY: `layout.size() > 0` (checked above), so `alloc_zeroed` is
         // safe to call.
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr)
-            .ok_or_else(|| HexError::internal("alloc_zeroed returned null"))?;
+            .ok_or_else(|| CenError::internal("alloc_zeroed returned null"))?;
         Ok(Self { ptr, size })
     }
 
@@ -537,13 +537,19 @@ impl AlignedBlock {
 impl Drop for AlignedBlock {
     fn drop(&mut self) {
         // SAFETY: the layout matches the one used in `zeroed()`.
-        let layout = Layout::from_size_align(self.size, MINIPAGE_ALIGN).unwrap();
-        unsafe { dealloc(self.ptr.as_ptr(), layout) }
+        // Use `unwrap_or_else` to avoid panicking in Drop — if the
+        // layout fails (shouldn't happen since it worked in `zeroed()`),
+        // we leak the allocation rather than crashing.
+        if let Ok(layout) = Layout::from_size_align(self.size, MINIPAGE_ALIGN) {
+            unsafe { dealloc(self.ptr.as_ptr(), layout) }
+        }
+        // If layout fails, the memory is leaked. This is safer than
+        // panicking in Drop, which would abort the process.
     }
 }
 
 /// Allocate a `size`-byte buffer aligned to 64 bytes.
-fn alloc_aligned_block(size: usize) -> HexResult<AlignedBlock> {
+fn alloc_aligned_block(size: usize) -> CenResult<AlignedBlock> {
     AlignedBlock::zeroed(size)
 }
 
@@ -562,12 +568,12 @@ pub struct PaxBlock {
 
 impl PaxBlock {
     /// Owning constructor: take ownership of an aligned buffer.
-    pub fn from_owned(buf: AlignedBlock, block_size: u32) -> HexResult<Self> {
+    pub fn from_owned(buf: AlignedBlock, block_size: u32) -> CenResult<Self> {
         if buf.len() < block_header_size() {
-            return Err(HexError::corrupt("PaxBlock: buffer shorter than header"));
+            return Err(CenError::corrupt("PaxBlock: buffer shorter than header"));
         }
         if buf.ptr() as usize % MINIPAGE_ALIGN != 0 {
-            return Err(HexError::corrupt("PaxBlock: buffer not 64B aligned"));
+            return Err(CenError::corrupt("PaxBlock: buffer not 64B aligned"));
         }
         Ok(Self { buf, block_size })
     }
@@ -609,12 +615,12 @@ impl PaxBlock {
 
     /// Column directory entry for column `idx`.
     #[inline]
-    pub fn directory(&self, idx: usize) -> HexResult<ColumnDirectory> {
+    pub fn directory(&self, idx: usize) -> CenResult<ColumnDirectory> {
         let off = block_header_size() + idx * core::mem::size_of::<ColumnDirectory>();
         let end = off + core::mem::size_of::<ColumnDirectory>();
         let buf = self.buf.as_slice();
         if end > buf.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "directory({}) out of bounds",
                 idx
             )));
@@ -623,14 +629,14 @@ impl PaxBlock {
     }
 
     /// Borrow the raw bytes of column `idx`'s minipage.
-    pub fn minipage_bytes(&self, idx: usize) -> HexResult<&[u8]> {
+    pub fn minipage_bytes(&self, idx: usize) -> CenResult<&[u8]> {
         let dir = self.directory(idx)?;
         let off = dir.minipage_off as usize;
         let len = dir.compressed_len as usize;
         let end = off + len;
         let buf = self.buf.as_slice();
         if end > buf.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "minipage({}) out of bounds: {}..{}",
                 idx, off, end
             )));
@@ -641,7 +647,7 @@ impl PaxBlock {
     /// Decode column `idx` (an integer column) back into a `Vec<i64>`. This
     /// is the *decoding* path — for hot scans you want [`Self::column_view`]
     /// which is zero-copy.
-    pub fn decode_i64_column(&self, idx: usize) -> HexResult<Vec<i64>> {
+    pub fn decode_i64_column(&self, idx: usize) -> CenResult<Vec<i64>> {
         let dir = self.directory(idx)?;
         let bytes = self.minipage_bytes(idx)?;
         let enc = Encoding::from_discriminant(dir.encoding);
@@ -651,11 +657,11 @@ impl PaxBlock {
     /// Zero-copy typed view over column `idx`'s minipage. Works for `Raw`
     /// encoded columns; for other encodings the caller should use
     /// [`Self::decode_i64_column`] instead.
-    pub fn column_view<T: Pod>(&self, idx: usize) -> HexResult<ColumnView<'_, T>> {
+    pub fn column_view<T: Pod>(&self, idx: usize) -> CenResult<ColumnView<'_, T>> {
         let dir = self.directory(idx)?;
         let bytes = self.minipage_bytes(idx)?;
         if dir.encoding != Encoding::Raw.discriminant() && !bytes.is_empty() {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "column_view: column {} is encoded ({:?}); decode first",
                 idx,
                 Encoding::from_discriminant(dir.encoding)
@@ -666,10 +672,10 @@ impl PaxBlock {
 
     /// Borrow the bytes of a single variable-length value (column `idx`,
     /// row `row`).
-    pub fn var_value(&self, idx: usize, row: usize) -> HexResult<Option<&[u8]>> {
+    pub fn var_value(&self, idx: usize, row: usize) -> CenResult<Option<&[u8]>> {
         let dir = self.directory(idx)?;
         if dir.kind != ValueKind::Bytes as u8 {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "var_value: column {} is not Bytes",
                 idx
             )));
@@ -677,7 +683,7 @@ impl PaxBlock {
         let mp = self.minipage_bytes(idx)?;
         let slot_off = row * 8;
         if slot_off + 8 > mp.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "var_value: slot {} out of bounds in column {}",
                 row, idx
             )));
@@ -691,7 +697,7 @@ impl PaxBlock {
         let heap_end = heap_off + len as usize;
         let buf = self.buf.as_slice();
         if heap_end > buf.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "var_value: heap slice {}..{} out of bounds",
                 heap_off, heap_end
             )));
@@ -701,10 +707,10 @@ impl PaxBlock {
 
     /// Reconstruct row `row` as a `Vec<Value>` for API-boundary use. This is
     /// *not* a hot-path function — it allocates.
-    pub fn materialize_row(&self, row: usize) -> HexResult<Vec<Value>> {
+    pub fn materialize_row(&self, row: usize) -> CenResult<Vec<Value>> {
         let hdr = self.header();
         if row as u32 >= hdr.row_count {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "materialize_row: row {} out of range (block has {} rows)",
                 row, hdr.row_count
             )));
@@ -775,22 +781,22 @@ impl<'a> PaxBlockReader<'a> {
         bytemuck::pod_read_unaligned(&self.buf[..block_header_size()])
     }
 
-    pub fn directory(&self, idx: usize) -> HexResult<ColumnDirectory> {
+    pub fn directory(&self, idx: usize) -> CenResult<ColumnDirectory> {
         let off = block_header_size() + idx * core::mem::size_of::<ColumnDirectory>();
         let end = off + core::mem::size_of::<ColumnDirectory>();
         if end > self.buf.len() {
-            return Err(HexError::corrupt(format!("directory({}) out of bounds", idx)));
+            return Err(CenError::corrupt(format!("directory({}) out of bounds", idx)));
         }
         Ok(bytemuck::pod_read_unaligned(&self.buf[off..end]))
     }
 
-    pub fn minipage_bytes(&self, idx: usize) -> HexResult<&'a [u8]> {
+    pub fn minipage_bytes(&self, idx: usize) -> CenResult<&'a [u8]> {
         let dir = self.directory(idx)?;
         let off = dir.minipage_off as usize;
         let len = dir.compressed_len as usize;
         let end = off + len;
         if end > self.buf.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "minipage({}) out of bounds: {}..{}",
                 idx, off, end
             )));
@@ -798,18 +804,18 @@ impl<'a> PaxBlockReader<'a> {
         Ok(&self.buf[off..end])
     }
 
-    pub fn decode_i64_column(&self, idx: usize) -> HexResult<Vec<i64>> {
+    pub fn decode_i64_column(&self, idx: usize) -> CenResult<Vec<i64>> {
         let dir = self.directory(idx)?;
         let bytes = self.minipage_bytes(idx)?;
         let enc = Encoding::from_discriminant(dir.encoding);
         decode_minipage(enc, bytes, dir.value_count as usize)
     }
 
-    pub fn column_view<T: Pod>(&self, idx: usize) -> HexResult<ColumnView<'a, T>> {
+    pub fn column_view<T: Pod>(&self, idx: usize) -> CenResult<ColumnView<'a, T>> {
         let bytes = self.minipage_bytes(idx)?;
         let dir = self.directory(idx)?;
         if dir.encoding != Encoding::Raw.discriminant() && !bytes.is_empty() {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "column_view: column {} is encoded; decode first",
                 idx
             )));
@@ -817,10 +823,10 @@ impl<'a> PaxBlockReader<'a> {
         ColumnView::new(bytes)
     }
 
-    pub fn var_value(&self, idx: usize, row: usize) -> HexResult<Option<&'a [u8]>> {
+    pub fn var_value(&self, idx: usize, row: usize) -> CenResult<Option<&'a [u8]>> {
         let dir = self.directory(idx)?;
         if dir.kind != ValueKind::Bytes as u8 {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "var_value: column {} is not Bytes",
                 idx
             )));
@@ -828,7 +834,7 @@ impl<'a> PaxBlockReader<'a> {
         let mp = self.minipage_bytes(idx)?;
         let slot_off = row * 8;
         if slot_off + 8 > mp.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "var_value: slot {} out of bounds in column {}",
                 row, idx
             )));
@@ -841,7 +847,7 @@ impl<'a> PaxBlockReader<'a> {
         let heap_off = self.header().varheap_off as usize + off;
         let heap_end = heap_off + len as usize;
         if heap_end > self.buf.len() {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "var_value: heap slice {}..{} out of bounds",
                 heap_off, heap_end
             )));

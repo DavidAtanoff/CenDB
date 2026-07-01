@@ -1,2 +1,33 @@
-target
-*.lock
+# Rust build artifacts
+target/
+**/target/
+
+# Cargo lock files (keep Cargo.lock for binaries, ignore for libraries)
+# Note: CenDB is a library workspace; Cargo.lock is not committed.
+Cargo.lock
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Database files (local testing)
+*.cdb
+*.wal
+*.seg
+
+# Temporary files
+*.tmp
+*.bak
+*~

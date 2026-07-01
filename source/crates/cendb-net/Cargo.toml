@@ -8,3 +8,7 @@ authors.workspace = true
 [dependencies]
 cendb-core = { path = "../cendb-core" }
 cendb-replication = { path = "../cendb-replication" }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -8,7 +8,7 @@
 //!
 //! ## Concurrency
 //!
-//! For the prototype the pool is `!Sync` (single-threaded). The `Frame`
+//! For this implementation the pool is `!Sync` (single-threaded). The `Frame`
 //! struct's atomic fields are still atomic because we want the *option* of
 //! sharing a pool across threads in the future without changing the Frame
 //! API. A production version would wrap `BufferPool` in a `Mutex` or use
@@ -21,7 +21,7 @@
 //! therefore guarantees that any `ColumnView` derived from a pinned page
 //! cannot outlive the pin — compile-time prevention of use-after-evict.
 
-use cendb_core::{FrameId, HexError, HexResult, PageId};
+use cendb_core::{FrameId, CenError, CenResult, PageId};
 
 use crate::frame::Frame;
 use crate::lru::LruK;
@@ -43,10 +43,10 @@ pub enum ReadHint {
 pub trait PageSource {
     /// Read the bytes of `page_id` into `buf`. `buf` is guaranteed to be
     /// `page_size` bytes long and 64-byte aligned.
-    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> HexResult<()>;
+    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> CenResult<()>;
 
     /// Write `buf` (the bytes of `page_id`) back to durable storage.
-    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> HexResult<()>;
+    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> CenResult<()>;
 
     /// Page size in bytes (must match what the pool was constructed with).
     fn page_size(&self) -> usize;
@@ -80,14 +80,23 @@ pub struct BufferPool {
 impl BufferPool {
     /// Construct a new pool with `frame_count` frames of `page_size` bytes
     /// each, backed by `source` for I/O.
-    pub fn new(source: Box<dyn PageSource>, frame_count: usize, page_size: usize) -> HexResult<Self> {
+    pub fn new(source: Box<dyn PageSource>, frame_count: usize, page_size: usize) -> CenResult<Self> {
         if frame_count == 0 {
-            return Err(HexError::constraint("BufferPool: frame_count must be > 0"));
+            return Err(CenError::constraint("BufferPool: frame_count must be > 0"));
         }
         if page_size == 0 || page_size % 64 != 0 {
-            return Err(HexError::constraint(
+            return Err(CenError::constraint(
                 "BufferPool: page_size must be a positive multiple of 64",
             ));
+        }
+        // Verify the source's page_size matches the pool's page_size.
+        // A mismatch would cause silent data corruption: read_page would
+        // write wrong-sized data into the frame buffer.
+        if source.page_size() != page_size {
+            return Err(CenError::constraint(format!(
+                "BufferPool: page_size mismatch: pool={}, source={}",
+                page_size, source.page_size()
+            )));
         }
         let mut frames: Vec<Frame> = Vec::with_capacity(frame_count);
         for i in 0..frame_count {
@@ -108,6 +117,15 @@ impl BufferPool {
         })
     }
 
+    /// Create a buffer pool backed by an mmap'd file for read-only access.
+    /// Uses `MmapPageSource` under the hood — zero-copy reads from the OS
+    /// page cache. Writes will fail (mmap is read-only).
+    #[cfg(feature = "mmap")]
+    pub fn with_mmap(path: impl AsRef<std::path::Path>, frame_count: usize, page_size: usize) -> CenResult<Self> {
+        let source = Box::new(crate::mmap::MmapPageSource::open(path, page_size)?);
+        Self::new(source, frame_count, page_size)
+    }
+
     /// Number of frames in the pool.
     #[inline]
     pub fn capacity(&self) -> usize {
@@ -126,7 +144,7 @@ impl BufferPool {
     /// [`PinnedPage`] guard whose lifetime is tied to the pool — the borrow
     /// checker prevents any `ColumnView` derived from it from outliving the
     /// pin.
-    pub fn pin_page(&mut self, page_id: PageId, hint: ReadHint) -> HexResult<PinnedPage<'_>> {
+    pub fn pin_page(&mut self, page_id: PageId, hint: ReadHint) -> CenResult<PinnedPage<'_>> {
         // Fast path: page already in pool.
         if let Some(&frame_id) = self.page_table.get(&page_id) {
             self.stats.hits += 1;
@@ -178,9 +196,9 @@ impl BufferPool {
 
     /// Allocate a new page in the pool (for write paths that create a new
     /// page rather than reading an existing one).
-    pub fn new_page(&mut self, page_id: PageId) -> HexResult<PinnedPage<'_>> {
+    pub fn new_page(&mut self, page_id: PageId) -> CenResult<PinnedPage<'_>> {
         if self.page_table.contains_key(&page_id) {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "new_page: page {:?} already exists",
                 page_id
             )));
@@ -208,7 +226,7 @@ impl BufferPool {
     }
 
     /// Flush a single page's dirty bytes back to disk (if dirty).
-    pub fn flush_page(&mut self, page_id: PageId) -> HexResult<()> {
+    pub fn flush_page(&mut self, page_id: PageId) -> CenResult<()> {
         let frame_id = match self.page_table.get(&page_id) {
             Some(&fid) => fid,
             None => return Ok(()), // not in pool; nothing to flush
@@ -218,7 +236,7 @@ impl BufferPool {
             return Ok(());
         }
         // WAL invariant: in production we would wait for WAL >= page_lsn
-        // here. For the prototype we write through immediately.
+        // here. For this implementation we write through immediately.
         let bytes: &[u8] = frame.as_bytes();
         self.source.write_page(page_id, bytes)?;
         frame.clear_dirty();
@@ -227,7 +245,7 @@ impl BufferPool {
     }
 
     /// Flush all dirty pages.
-    pub fn flush_all(&mut self) -> HexResult<()> {
+    pub fn flush_all(&mut self) -> CenResult<()> {
         let pages: Vec<PageId> = self.page_table.keys().copied().collect();
         for p in pages {
             self.flush_page(p)?;
@@ -237,7 +255,7 @@ impl BufferPool {
 
     /// Evict a frame using the LRU-K policy, or take one from the free list.
     /// Returns the FrameId of an available (now-empty) frame.
-    fn evict_or_take_free(&mut self) -> HexResult<FrameId> {
+    fn evict_or_take_free(&mut self) -> CenResult<FrameId> {
         // Try the free list first.
         if let Some(frame_id) = self.free_list.pop() {
             return Ok(frame_id);
@@ -246,12 +264,12 @@ impl BufferPool {
         let victim = self
             .replacer
             .pick_victim()
-            .ok_or_else(|| HexError::internal("BufferPool: no evictable frames (all pinned?)"))?;
+            .ok_or_else(|| CenError::internal("BufferPool: no evictable frames (all pinned?)"))?;
         let frame = &self.frames[victim.0 as usize];
         // Double-check pin count — the policy shouldn't return a pinned frame
         // but we guard against bugs anyway.
         if frame.is_pinned() {
-            return Err(HexError::internal(format!(
+            return Err(CenError::internal(format!(
                 "BufferPool: victim frame {:?} is pinned",
                 victim
             )));
@@ -259,7 +277,7 @@ impl BufferPool {
         // If dirty, flush before evicting.
         let old_page_id = frame
             .page_id()
-            .ok_or_else(|| HexError::internal("evict_or_take_free: victim has no page_id"))?;
+            .ok_or_else(|| CenError::internal("evict_or_take_free: victim has no page_id"))?;
         if frame.is_dirty() {
             let bytes: &[u8] = frame.as_bytes();
             self.source.write_page(old_page_id, bytes)?;
@@ -372,7 +390,7 @@ impl InMemoryPageSource {
 }
 
 impl PageSource for InMemoryPageSource {
-    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> HexResult<()> {
+    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> CenResult<()> {
         match self.pages.get(&page_id) {
             Some(src) => {
                 buf.copy_from_slice(src);
@@ -380,7 +398,7 @@ impl PageSource for InMemoryPageSource {
             }
             None => {
                 // If the page doesn't exist, return zeros. This matches the
-                // "new page" semantics for the prototype — the caller is
+                // "new page" semantics for this implementation — the caller is
                 // responsible for writing real data into the frame.
                 for b in buf.iter_mut() {
                     *b = 0;
@@ -390,7 +408,7 @@ impl PageSource for InMemoryPageSource {
         }
     }
 
-    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> HexResult<()> {
+    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> CenResult<()> {
         self.pages.insert(page_id, buf.to_vec());
         Ok(())
     }

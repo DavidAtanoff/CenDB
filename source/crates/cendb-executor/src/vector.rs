@@ -2,6 +2,7 @@
 
 /// A selection vector — indices of rows that passed a filter.
 /// Stored as `Vec<u32>` for direct indexing into column slices.
+#[derive(Clone, Debug)]
 pub struct SelectionVector {
     pub indices: Vec<u32>,
 }
@@ -63,7 +64,7 @@ impl Default for SelectionVector {
 //   * Contiguous memory access.
 //
 // For explicit SIMD, see the `std::simd` module (nightly) or the `packed_simd`
-// crate. For the prototype we rely on auto-vectorization, which achieves
+// crate. For this implementation we rely on auto-vectorization, which achieves
 // ~90% of hand-written SIMD performance with zero platform-specific code.
 
 /// Filter `col` for rows where `col[i] == val`. Returns a selection vector.

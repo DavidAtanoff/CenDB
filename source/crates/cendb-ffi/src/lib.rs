@@ -4,14 +4,14 @@
 //! so it can be called from C, C++, Python (via ctypes/cffi), Go (cgo), and
 //! Node.js (N-API). The design follows §5 of the spec:
 //!
-//!   * **Opaque handles only.** Callers hold `*mut HexDb` / `*mut HexBytes`
+//!   * **Opaque handles only.** Callers hold `*mut CenDb` / `*mut CenBytes`
 //!     pointers; no Rust struct crosses the boundary.
 //!   * **Caller never frees Rust memory directly.** Every Rust-allocated
-//!     buffer has a paired `hex_*_free` function.
+//!     buffer has a paired `cendb_*_free` function.
 //!   * **Errors are integer codes + thread-local last-error detail.**
 //!     Avoids out-params everywhere; ergonomic for FFI.
 //!   * **No panics across FFI.** Every `extern "C"` fn is wrapped in
-//!     `catch_unwind`; a panic becomes `HEX_ERR_INTERNAL`.
+//!     `catch_unwind`; a panic becomes `CEN_ERR_INTERNAL`.
 //!   * **No global state** except the thread-local last-error slot.
 
 use std::cell::RefCell;
@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Mutex;
 
-use cendb_core::{CenDbConfig, HexError, HexResult, HexStatus, SegmentId, NodeId};
-use cendb_projection::{KvStore, TimeSeriesSchema, TimeSeriesStore, GraphProjection, HexDoc};
+use cendb_core::{CenDbConfig, CenError, CenResult, CenStatus, SegmentId, NodeId};
+use cendb_projection::{KvStore, TimeSeriesSchema, TimeSeriesStore, GraphProjection, CenDoc};
 
 // ============================================================================
 // Opaque handle types. We never expose the actual Rust structs across the
@@ -31,7 +31,7 @@ use cendb_projection::{KvStore, TimeSeriesSchema, TimeSeriesStore, GraphProjecti
 // ============================================================================
 
 /// Opaque database handle. Internally wraps a [`CenDb`] instance.
-pub struct HexDb {
+pub struct CenDb {
     pub(crate) kv: Mutex<KvStore>,
     pub(crate) ts: Mutex<TimeSeriesStore>,
     pub(crate) graph: Mutex<GraphProjection>,
@@ -43,15 +43,15 @@ pub struct HexDb {
 }
 
 /// Owned bytes returned from Rust to C. The caller must free via
-/// [`hex_bytes_free`].
+/// [`cendb_bytes_free`].
 #[repr(C)]
-pub struct HexBytes {
+pub struct CenBytes {
     pub ptr: *mut u8,
     pub len: usize,
     pub cap: usize,
 }
 
-impl HexBytes {
+impl CenBytes {
     /// Construct from a Rust `Vec<u8>`. Takes ownership of the Vec's
     /// allocation.
     pub fn from_vec(v: Vec<u8>) -> Self {
@@ -59,11 +59,11 @@ impl HexBytes {
         let ptr = v.as_mut_ptr();
         let len = v.len();
         let cap = v.capacity();
-        std::mem::forget(v); // don't drop; caller will free via hex_bytes_free
+        std::mem::forget(v); // don't drop; caller will free via cendb_bytes_free
         Self { ptr, len, cap }
     }
 
-    /// Construct a null/empty HexBytes (e.g. for "not found" returns).
+    /// Construct a null/empty CenBytes (e.g. for "not found" returns).
     pub fn null() -> Self {
         Self { ptr: ptr::null_mut(), len: 0, cap: 0 }
     }
@@ -88,7 +88,7 @@ thread_local! {
 }
 
 /// Set the last-error message for the current thread.
-fn set_last_error(err: &HexError) {
+fn set_last_error(err: &CenError) {
     let msg = format!("{:?}: {}", err.status, err.message);
     if let Ok(cstr) = CString::new(msg) {
         LAST_ERROR.with(|e| {
@@ -110,7 +110,7 @@ fn set_last_error_panic(msg: &str) {
 /// Return the last error message for the current thread, or null if none.
 /// The returned pointer is valid until the next FFI call on the same thread.
 #[no_mangle]
-pub extern "C" fn hex_last_error_message() -> *const c_char {
+pub extern "C" fn cendb_last_error_message() -> *const c_char {
     LAST_ERROR.with(|e| {
         e.borrow()
             .as_ref()
@@ -120,23 +120,23 @@ pub extern "C" fn hex_last_error_message() -> *const c_char {
 
 /// Clear the last-error for the current thread.
 #[no_mangle]
-pub extern "C" fn hex_clear_last_error() {
+pub extern "C" fn cendb_clear_last_error() {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = None;
     });
 }
 
 // ============================================================================
-// FFI guard: run a closure, convert Result to HexStatus, set last-error on
+// FFI guard: run a closure, convert Result to CenStatus, set last-error on
 // failure, and catch any panic.
 // ============================================================================
 
-fn ffi_guard<F, T>(f: F) -> HexStatus
+fn ffi_guard<F, T>(f: F) -> CenStatus
 where
-    F: FnOnce() -> HexResult<T>,
+    F: FnOnce() -> CenResult<T>,
 {
     match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(_)) => HexStatus::Ok,
+        Ok(Ok(_)) => CenStatus::Ok,
         Ok(Err(e)) => {
             set_last_error(&e);
             e.status
@@ -150,30 +150,30 @@ where
                 "unknown panic".to_string()
             };
             set_last_error_panic(&msg);
-            HexStatus::ErrInternal
+            CenStatus::ErrInternal
         }
     }
 }
 
 /// Like [`ffi_guard`] but returns a value via an out-pointer.
 ///
-/// Note: this helper is currently unused (the prototype's FFI surface uses
+/// Note: this helper is currently unused (the implementation's FFI surface uses
 /// direct out-pointers in each function). It's kept here as part of the
 /// public helper API for future expansion.
 #[allow(dead_code)]
-fn ffi_guard_out<F>(f: F, out: *mut *mut c_void) -> HexStatus
+fn ffi_guard_out<F>(f: F, out: *mut *mut c_void) -> CenStatus
 where
-    F: FnOnce() -> HexResult<*mut c_void>,
+    F: FnOnce() -> CenResult<*mut c_void>,
 {
     if out.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(ptr_val)) => {
             unsafe {
                 *out = ptr_val;
             }
-            HexStatus::Ok
+            CenStatus::Ok
         }
         Ok(Err(e)) => {
             set_last_error(&e);
@@ -188,13 +188,13 @@ where
                 "unknown panic".to_string()
             };
             set_last_error_panic(&msg);
-            HexStatus::ErrInternal
+            CenStatus::ErrInternal
         }
     }
 }
 
 // ============================================================================
-// Lifecycle: hex_open / hex_close
+// Lifecycle: cendb_open / cendb_close
 // ============================================================================
 
 /// Open a CenDB database.
@@ -211,13 +211,13 @@ where
 /// `path` must be a valid null-terminated UTF-8 C string or null.
 /// `cfg` may be null (defaults apply). `out_db` must be non-null.
 #[no_mangle]
-pub unsafe extern "C" fn hex_open(
+pub unsafe extern "C" fn cendb_open(
     path: *const c_char,
     cfg: *const CenDbConfig,
-    out_db: *mut *mut HexDb,
-) -> HexStatus {
+    out_db: *mut *mut CenDb,
+) -> CenStatus {
     if out_db.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let path_str = if path.is_null() {
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn hex_open(
             // Create directory if it does not exist.
             if !dir.exists() {
                 std::fs::create_dir_all(&dir).map_err(|e| {
-                    HexError::io(format!("hex_open: cannot create dir {:?}: {}", dir, e))
+                    CenError::io(format!("cendb_open: cannot create dir {:?}: {}", dir, e))
                 })?;
             }
             let kv_path = dir.join("cendb.kv.seg");
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn hex_open(
             (KvStore::new(SegmentId(1), block_size), None)
         };
 
-        let db = Box::new(HexDb {
+        let db = Box::new(CenDb {
             kv: Mutex::new(kv),
             ts: Mutex::new(TimeSeriesStore::new(
                 TimeSeriesSchema {
@@ -276,11 +276,11 @@ pub unsafe extern "C" fn hex_open(
 /// was specified at open time). The handle must not be used after this call.
 ///
 /// # Safety
-/// `db` must be a valid pointer returned by [`hex_open`] and not already closed.
+/// `db` must be a valid pointer returned by [`cendb_open`] and not already closed.
 #[no_mangle]
-pub unsafe extern "C" fn hex_close(db: *mut HexDb) -> HexStatus {
+pub unsafe extern "C" fn cendb_close(db: *mut CenDb) -> CenStatus {
     if db.is_null() {
-        return HexStatus::Ok;
+        return CenStatus::Ok;
     }
     ffi_guard(|| {
         let mut db = Box::from_raw(db);
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn hex_close(db: *mut HexDb) -> HexStatus {
 }
 
 // ============================================================================
-// Key-Value fast path: hex_kv_put / hex_kv_get
+// Key-Value fast path: cendb_kv_put / cendb_kv_get
 // ============================================================================
 
 /// Insert or overwrite a key-value pair.
@@ -303,15 +303,15 @@ pub unsafe extern "C" fn hex_close(db: *mut HexDb) -> HexStatus {
 /// `db` must be valid. `k` and `v` must be valid byte arrays of length `kn`
 /// and `vn` respectively.
 #[no_mangle]
-pub unsafe extern "C" fn hex_kv_put(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_kv_put(
+    db: *mut CenDb,
     k: *const u8,
     kn: usize,
     v: *const u8,
     vn: usize,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() || k.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -327,45 +327,45 @@ pub unsafe extern "C" fn hex_kv_put(
 }
 
 /// Look up a key. On success the value is written to `out_val`; the caller
-/// must free it via [`hex_bytes_free`].
+/// must free it via [`cendb_bytes_free`].
 ///
-/// Returns `HEX_ERR_NOT_FOUND` if the key doesn't exist.
+/// Returns `CEN_ERR_NOT_FOUND` if the key doesn't exist.
 ///
 /// # Safety
 /// `db` and `k` must be valid. `out_val` must be a valid pointer to a
-/// `HexBytes` struct (it will be overwritten).
+/// `CenBytes` struct (it will be overwritten).
 #[no_mangle]
-pub unsafe extern "C" fn hex_kv_get(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_kv_get(
+    db: *mut CenDb,
     k: *const u8,
     kn: usize,
-    out_val: *mut HexBytes,
-) -> HexStatus {
+    out_val: *mut CenBytes,
+) -> CenStatus {
     if db.is_null() || k.is_null() || out_val.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     let status = ffi_guard(|| {
         let db = &*db;
         let key = core::slice::from_raw_parts(k, kn);
         match db.kv.lock().unwrap().get(key)? {
             Some(val) => {
-                *out_val = HexBytes::from_vec(val);
+                *out_val = CenBytes::from_vec(val);
                 Ok(())
             }
-            None => Err(HexError::not_found("key not found")),
+            None => Err(CenError::not_found("key not found")),
         }
     });
-    if status != HexStatus::Ok {
+    if status != CenStatus::Ok {
         // Ensure out_val is null on failure.
         unsafe {
-            *out_val = HexBytes::null();
+            *out_val = CenBytes::null();
         }
     }
     status
 }
 
 // ============================================================================
-// Time-series fast path: hex_ts_append / hex_ts_range
+// Time-series fast path: cendb_ts_append / cendb_ts_range
 // ============================================================================
 
 /// Append a time-series reading.
@@ -373,14 +373,14 @@ pub unsafe extern "C" fn hex_kv_get(
 /// # Safety
 /// `db` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn hex_ts_append(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_ts_append(
+    db: *mut CenDb,
     ts: i64,
     series_id: i64,
     value: f64,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -394,9 +394,9 @@ pub unsafe extern "C" fn hex_ts_append(
 /// # Safety
 /// `db` must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn hex_ts_flush(db: *mut HexDb) -> HexStatus {
+pub unsafe extern "C" fn cendb_ts_flush(db: *mut CenDb) -> CenStatus {
     if db.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -411,14 +411,14 @@ pub unsafe extern "C" fn hex_ts_flush(db: *mut HexDb) -> HexStatus {
 /// # Safety
 /// `db` must be valid. `out_count` must be a valid pointer.
 #[no_mangle]
-pub unsafe extern "C" fn hex_ts_range_count(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_ts_range_count(
+    db: *mut CenDb,
     lo: i64,
     hi: i64,
     out_count: *mut u64,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() || out_count.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -429,33 +429,33 @@ pub unsafe extern "C" fn hex_ts_range_count(
 }
 
 // ============================================================================
-// Arrow-compatible query interface (simplified for the prototype).
+// Arrow-compatible query interface (simplified for this implementation).
 // ============================================================================
 
-/// Result of an Arrow-style query. For the prototype we return a flat
+/// Result of an Arrow-style query. For this implementation we return a flat
 /// `Vec<Vec<u8>>` of columnar batches; a production version would return
 /// the actual Arrow C Data Interface structs.
 #[repr(C)]
-pub struct HexArrowResult {
+pub struct CenArrowResult {
     pub batch_count: u64,
     pub row_count: u64,
     pub bytes: *mut u8,
     pub bytes_len: usize,
 }
 
-/// Run a query and return an Arrow-style result. For the prototype, this
+/// Run a query and return an Arrow-style result. For this implementation, this
 /// returns the count of KV pairs (as a single "column" of u64 row counts).
 ///
 /// # Safety
 /// `db` must be valid. `out_result` must be a valid pointer.
 #[no_mangle]
-pub unsafe extern "C" fn hex_query_arrow(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_query_arrow(
+    db: *mut CenDb,
     query: *const c_char,
-    out_result: *mut HexArrowResult,
-) -> HexStatus {
+    out_result: *mut CenArrowResult,
+) -> CenStatus {
     if db.is_null() || out_result.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -464,13 +464,13 @@ pub unsafe extern "C" fn hex_query_arrow(
         } else {
             CStr::from_ptr(query).to_string_lossy().into_owned()
         };
-        // For the prototype, return the KV pair count.
+        // For this implementation, return the KV pair count.
         let kv_count = db.kv.lock().unwrap().len() as u64;
         let bytes = kv_count.to_le_bytes().to_vec();
         let bytes_len = bytes.len();
         let bytes_ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        *out_result = HexArrowResult {
+        *out_result = CenArrowResult {
             batch_count: 1,
             row_count: 1,
             bytes: bytes_ptr,
@@ -480,13 +480,13 @@ pub unsafe extern "C" fn hex_query_arrow(
     })
 }
 
-/// Free an Arrow result returned by [`hex_query_arrow`].
+/// Free an Arrow result returned by [`cendb_query_arrow`].
 ///
 /// # Safety
-/// `result` must be a valid pointer to a `HexArrowResult` previously returned
-/// by `hex_query_arrow`.
+/// `result` must be a valid pointer to a `CenArrowResult` previously returned
+/// by `cendb_query_arrow`.
 #[no_mangle]
-pub unsafe extern "C" fn hex_arrow_result_free(result: *mut HexArrowResult) {
+pub unsafe extern "C" fn cendb_arrow_result_free(result: *mut CenArrowResult) {
     if result.is_null() {
         return;
     }
@@ -503,13 +503,13 @@ pub unsafe extern "C" fn hex_arrow_result_free(result: *mut HexArrowResult) {
 // Memory management
 // ============================================================================
 
-/// Free a `HexBytes` struct returned by the FFI.
+/// Free a `CenBytes` struct returned by the FFI.
 ///
 /// # Safety
-/// `b` must be a valid pointer to a `HexBytes` previously returned by
-/// [`hex_kv_get`] or similar. After this call the bytes are invalid.
+/// `b` must be a valid pointer to a `CenBytes` previously returned by
+/// [`cendb_kv_get`] or similar. After this call the bytes are invalid.
 #[no_mangle]
-pub unsafe extern "C" fn hex_bytes_free(b: *mut HexBytes) {
+pub unsafe extern "C" fn cendb_bytes_free(b: *mut CenBytes) {
     if b.is_null() {
         return;
     }
@@ -528,13 +528,13 @@ pub unsafe extern "C" fn hex_bytes_free(b: *mut HexBytes) {
 
 /// Add a node to the graph database.
 #[no_mangle]
-pub unsafe extern "C" fn hex_graph_add_node(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_graph_add_node(
+    db: *mut CenDb,
     node_id: u64,
     label: *const c_char,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() || label.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -546,14 +546,14 @@ pub unsafe extern "C" fn hex_graph_add_node(
 
 /// Add an edge to the graph database.
 #[no_mangle]
-pub unsafe extern "C" fn hex_graph_add_edge(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_graph_add_edge(
+    db: *mut CenDb,
     src: u64,
     dst: u64,
     label: *const c_char,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() || label.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -563,16 +563,16 @@ pub unsafe extern "C" fn hex_graph_add_edge(
     })
 }
 
-/// Run Breadth-First Search (BFS) and serialize visited nodes to flat binary bytes in HexBytes.
+/// Run Breadth-First Search (BFS) and serialize visited nodes to flat binary bytes in CenBytes.
 #[no_mangle]
-pub unsafe extern "C" fn hex_graph_bfs(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_graph_bfs(
+    db: *mut CenDb,
     start_node: u64,
     depth: u32,
-    out_val: *mut HexBytes,
-) -> HexStatus {
+    out_val: *mut CenBytes,
+) -> CenStatus {
     if db.is_null() || out_val.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     let status = ffi_guard(|| {
         let db = &*db;
@@ -584,30 +584,30 @@ pub unsafe extern "C" fn hex_graph_bfs(
         for (_, node) in results {
             bytes.extend_from_slice(&node.0.to_le_bytes());
         }
-        *out_val = HexBytes::from_vec(bytes);
+        *out_val = CenBytes::from_vec(bytes);
         Ok(())
     });
-    if status != HexStatus::Ok {
-        unsafe { *out_val = HexBytes::null(); }
+    if status != CenStatus::Ok {
+        unsafe { *out_val = CenBytes::null(); }
     }
     status
 }
 
 // ============================================================================
-// Document store: HexDoc binary JSON
+// Document store: CenDoc binary JSON
 // ============================================================================
 
 /// Put a document (JSON bytes) into the store.
 #[no_mangle]
-pub unsafe extern "C" fn hex_doc_put(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_doc_put(
+    db: *mut CenDb,
     key: *const u8,
     key_len: usize,
     doc_bytes: *const u8,
     doc_len: usize,
-) -> HexStatus {
+) -> CenStatus {
     if db.is_null() || key.is_null() || doc_bytes.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     ffi_guard(|| {
         let db = &*db;
@@ -618,17 +618,17 @@ pub unsafe extern "C" fn hex_doc_put(
     })
 }
 
-/// Retrieve a nested field value from a HexDoc stored in the KV store.
+/// Retrieve a nested field value from a CenDoc stored in the KV store.
 #[no_mangle]
-pub unsafe extern "C" fn hex_doc_get_field(
-    db: *mut HexDb,
+pub unsafe extern "C" fn cendb_doc_get_field(
+    db: *mut CenDb,
     key: *const u8,
     key_len: usize,
     field_path: *const c_char,
-    out_val: *mut HexBytes,
-) -> HexStatus {
+    out_val: *mut CenBytes,
+) -> CenStatus {
     if db.is_null() || key.is_null() || field_path.is_null() || out_val.is_null() {
-        return HexStatus::ErrConstraint;
+        return CenStatus::ErrConstraint;
     }
     let status = ffi_guard(|| {
         let db = &*db;
@@ -636,21 +636,21 @@ pub unsafe extern "C" fn hex_doc_get_field(
         let path = CStr::from_ptr(field_path).to_str().unwrap_or("");
         match db.kv.lock().unwrap().get(k)? {
             Some(doc_bytes) => {
-                let reader = HexDoc::new(&doc_bytes)?;
+                let reader = CenDoc::new(&doc_bytes)?;
                 match reader.get_field(path)? {
                     Some(val) => {
                         let out_str = format!("{:?}", val);
-                        *out_val = HexBytes::from_vec(out_str.into_bytes());
+                        *out_val = CenBytes::from_vec(out_str.into_bytes());
                         Ok(())
                     }
-                    None => Err(HexError::not_found("field not found")),
+                    None => Err(CenError::not_found("field not found")),
                 }
             }
-            None => Err(HexError::not_found("document not found")),
+            None => Err(CenError::not_found("document not found")),
         }
     });
-    if status != HexStatus::Ok {
-        unsafe { *out_val = HexBytes::null(); }
+    if status != CenStatus::Ok {
+        unsafe { *out_val = CenBytes::null(); }
     }
     status
 }
@@ -662,7 +662,7 @@ pub unsafe extern "C" fn hex_doc_get_field(
 /// Return the CenDB version string (e.g. "0.1.0"). The returned pointer is
 /// valid for the lifetime of the library and must not be freed.
 #[no_mangle]
-pub extern "C" fn hex_version() -> *const c_char {
+pub extern "C" fn cendb_version() -> *const c_char {
     static VERSION: &[u8] = b"0.1.0\0";
     VERSION.as_ptr() as *const c_char
 }
@@ -678,28 +678,28 @@ mod tests {
 
     #[test]
     fn open_close_roundtrip() {
-        let mut db_ptr: *mut HexDb = ptr::null_mut();
+        let mut db_ptr: *mut CenDb = ptr::null_mut();
         let cfg = CenDbConfig::default();
-        let status = unsafe { hex_open(ptr::null(), &cfg, &mut db_ptr) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_open(ptr::null(), &cfg, &mut db_ptr) };
+        assert_eq!(status, CenStatus::Ok);
         assert!(!db_ptr.is_null());
 
-        let status = unsafe { hex_close(db_ptr) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_close(db_ptr) };
+        assert_eq!(status, CenStatus::Ok);
     }
 
     #[test]
     fn kv_put_get_roundtrip() {
-        let mut db_ptr: *mut HexDb = ptr::null_mut();
+        let mut db_ptr: *mut CenDb = ptr::null_mut();
         let cfg = CenDbConfig::default();
-        unsafe { hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"test_key";
         let val = b"test_value";
         let status = unsafe {
-            hex_kv_put(db_ptr, key.as_ptr(), key.len(), val.as_ptr(), val.len())
+            cendb_kv_put(db_ptr, key.as_ptr(), key.len(), val.as_ptr(), val.len())
         };
-        assert_eq!(status, HexStatus::Ok);
+        assert_eq!(status, CenStatus::Ok);
 
         // Flush so the value lands in a sealed block.
         // (KV pending writes are already visible via get, so this isn't
@@ -707,52 +707,52 @@ mod tests {
         // Actually the public FFI doesn't expose kv_flush — we rely on the
         // pending visibility.
 
-        let mut out = HexBytes::null();
-        let status = unsafe { hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
-        assert_eq!(status, HexStatus::Ok);
+        let mut out = CenBytes::null();
+        let status = unsafe { cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        assert_eq!(status, CenStatus::Ok);
         assert_eq!(out.as_slice(), val);
 
-        unsafe { hex_bytes_free(&mut out) };
-        unsafe { hex_close(db_ptr) };
+        unsafe { cendb_bytes_free(&mut out) };
+        unsafe { cendb_close(db_ptr) };
     }
 
     #[test]
     fn kv_get_missing_returns_not_found() {
-        let mut db_ptr: *mut HexDb = ptr::null_mut();
+        let mut db_ptr: *mut CenDb = ptr::null_mut();
         let cfg = CenDbConfig::default();
-        unsafe { hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"nonexistent";
-        let mut out = HexBytes::null();
-        let status = unsafe { hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
-        assert_eq!(status, HexStatus::ErrNotFound);
+        let mut out = CenBytes::null();
+        let status = unsafe { cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        assert_eq!(status, CenStatus::ErrNotFound);
         assert!(out.ptr.is_null());
 
-        unsafe { hex_close(db_ptr) };
+        unsafe { cendb_close(db_ptr) };
     }
 
     #[test]
     fn last_error_message_set_on_failure() {
-        let mut db_ptr: *mut HexDb = ptr::null_mut();
+        let mut db_ptr: *mut CenDb = ptr::null_mut();
         let cfg = CenDbConfig::default();
-        unsafe { hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         let key = b"missing";
-        let mut out = HexBytes::null();
-        let status = unsafe { hex_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
-        assert_eq!(status, HexStatus::ErrNotFound);
+        let mut out = CenBytes::null();
+        let status = unsafe { cendb_kv_get(db_ptr, key.as_ptr(), key.len(), &mut out) };
+        assert_eq!(status, CenStatus::ErrNotFound);
 
-        let msg_ptr = hex_last_error_message();
+        let msg_ptr = cendb_last_error_message();
         assert!(!msg_ptr.is_null());
         let msg = unsafe { CStr::from_ptr(msg_ptr).to_string_lossy().into_owned() };
         assert!(msg.contains("not found"), "expected 'not found' in error, got: {}", msg);
 
-        unsafe { hex_close(db_ptr) };
+        unsafe { cendb_close(db_ptr) };
     }
 
     #[test]
     fn version_string_is_valid() {
-        let ptr = hex_version();
+        let ptr = cendb_version();
         assert!(!ptr.is_null());
         let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
         assert_eq!(s, "0.1.0");
@@ -760,28 +760,28 @@ mod tests {
 
     #[test]
     fn ts_append_and_range_count() {
-        let mut db_ptr: *mut HexDb = ptr::null_mut();
+        let mut db_ptr: *mut CenDb = ptr::null_mut();
         let cfg = CenDbConfig::default();
-        unsafe { hex_open(ptr::null(), &cfg, &mut db_ptr) };
+        unsafe { cendb_open(ptr::null(), &cfg, &mut db_ptr) };
 
         for ts in 0..100i64 {
-            let status = unsafe { hex_ts_append(db_ptr, ts, 1, ts as f64) };
-            assert_eq!(status, HexStatus::Ok);
+            let status = unsafe { cendb_ts_append(db_ptr, ts, 1, ts as f64) };
+            assert_eq!(status, CenStatus::Ok);
         }
-        unsafe { hex_ts_flush(db_ptr) };
+        unsafe { cendb_ts_flush(db_ptr) };
 
         let mut count: u64 = 0;
-        let status = unsafe { hex_ts_range_count(db_ptr, 10, 20, &mut count) };
-        assert_eq!(status, HexStatus::Ok);
+        let status = unsafe { cendb_ts_range_count(db_ptr, 10, 20, &mut count) };
+        assert_eq!(status, CenStatus::Ok);
         assert!(count > 0, "expected >0 results, got {}", count);
 
-        unsafe { hex_close(db_ptr) };
+        unsafe { cendb_close(db_ptr) };
     }
 
     #[test]
     fn null_db_returns_constraint_error() {
-        let status = unsafe { hex_kv_put(ptr::null_mut(), ptr::null(), 0, ptr::null(), 0) };
-        assert_eq!(status, HexStatus::ErrConstraint);
+        let status = unsafe { cendb_kv_put(ptr::null_mut(), ptr::null(), 0, ptr::null(), 0) };
+        assert_eq!(status, CenStatus::ErrConstraint);
     }
 
     // Suppress unused-import warning for CString in this test module.

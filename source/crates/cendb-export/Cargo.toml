@@ -9,3 +9,6 @@ authors.workspace = true
 cendb-core = { path = "../cendb-core" }
 cendb-storage = { path = "../cendb-storage" }
 cendb-projection = { path = "../cendb-projection" }
+arrow = "59.0.0"
+parquet = "59.0.0"
+bytes = "1.12.0"

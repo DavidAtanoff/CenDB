@@ -108,8 +108,8 @@ Backends implement `PageSource`:
 
 ```rust
 pub trait PageSource {
-    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> HexResult<()>;
-    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> HexResult<()>;
+    fn read_page(&mut self, page_id: PageId, buf: &mut [u8]) -> CenResult<()>;
+    fn write_page(&mut self, page_id: PageId, buf: &[u8]) -> CenResult<()>;
     fn page_size(&self) -> usize;
 }
 ```

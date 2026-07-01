@@ -5,14 +5,14 @@
 //!      run on encoded data without decoding).
 //!   2. Optional *general-purpose* block compression (LZ4/zstd) for cold data.
 //!
-//! For the prototype we implement the four most impactful encodings — `Raw`,
+//! For this implementation we implement the four most impactful encodings — `Raw`,
 //! `BitPacked`, `FrameOfReference`, and `DeltaOfDelta` — end-to-end (encode
 //! AND decode), and stub the remaining variants with a transparent fall-through
 //! to `Raw`. The encoders operate on `&[i64]` inputs (the canonical form for
 //! integer columns) and produce a `Vec<u8>` that is written into the minipage.
 
-use cendb_core::HexResult;
-use cendb_core::HexError;
+use cendb_core::CenResult;
+use cendb_core::CenError;
 
 /// Tag for the encoding of a minipage. The discriminant is what gets written
 /// into the on-disk `ColumnDirectory.encoding` field, so the values are
@@ -28,15 +28,15 @@ pub enum Encoding {
     FrameOfReference { base: i64, bits: u8 } = 2,
     /// Monotonic integers (timestamps, sequential PKs).
     DeltaOfDelta = 3,
-    /// Gorilla XOR floats for time-series (stub → Raw in this prototype).
+    /// Gorilla XOR floats for time-series (stub → Raw in this implementation).
     Gorilla = 4,
-    /// Improved TS float codec (stub → Raw in this prototype).
+    /// Improved TS float codec (stub → Raw in this implementation).
     Chimp128 = 5,
-    /// Low-cardinality strings/enums (stub → Raw in this prototype).
+    /// Low-cardinality strings/enums (stub → Raw in this implementation).
     Dictionary { dict_id: u32 } = 6,
-    /// Long runs of identical values (stub → Raw in this prototype).
+    /// Long runs of identical values (stub → Raw in this implementation).
     RunLength = 7,
-    /// FSST short-string compression (stub → Raw in this prototype).
+    /// FSST short-string compression (stub → Raw in this implementation).
     Fsst = 8,
 }
 
@@ -96,11 +96,11 @@ pub trait EncodingCodec: Send + Sync {
     /// Encode `vals` (a slice of i64) into a byte buffer suitable for a
     /// minipage. The returned buffer's first byte is the encoding discriminant
     /// so the decoder knows which path to take.
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>>;
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>>;
 
     /// Decode a minipage back into `Vec<i64>`. The input must include the
     /// leading discriminant byte.
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>>;
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>>;
 }
 
 /// Pick the concrete codec for an `Encoding` value.
@@ -111,13 +111,15 @@ pub fn codec_for(enc: Encoding) -> Box<dyn EncodingCodec> {
         Encoding::FrameOfReference { .. } => Box::new(FrameOfReferenceCodec),
         Encoding::DeltaOfDelta => Box::new(DeltaOfDeltaCodec),
         Encoding::RunLength => Box::new(RunLengthCodec),
-        // Gorilla / Chimp128 / Dictionary / Fsst operate on float/string
-        // data, not i64; we fall through to Raw for the i64 path. The
-        // F64 column stores its values as bit-patterns in i64 form, so
-        // Gorilla is invoked separately by the F64 column writer.
+        // Dictionary is now a real codec (Phase 3 optimization).
+        // Works on i64: builds a dictionary of distinct values, then
+        // bit-packs the codes. Great for low-cardinality columns.
+        Encoding::Dictionary { .. } => Box::new(DictionaryCodec),
+        // Gorilla is invoked separately by the F64 column writer (it
+        // expects f64 bit patterns, not raw i64). Chimp128 and Fsst
+        // remain stubs.
         Encoding::Gorilla => Box::new(RawCodec),
         Encoding::Chimp128 => Box::new(RawCodec),
-        Encoding::Dictionary { .. } => Box::new(RawCodec),
         Encoding::Fsst => Box::new(RawCodec),
     }
 }
@@ -125,7 +127,7 @@ pub fn codec_for(enc: Encoding) -> Box<dyn EncodingCodec> {
 /// Re-encode a minipage using whatever encoding the caller requests. Returns
 /// the encoded bytes (without the discriminant byte — the column directory
 /// already records the encoding).
-pub fn encode_minipage(enc: Encoding, vals: &[i64]) -> HexResult<Vec<u8>> {
+pub fn encode_minipage(enc: Encoding, vals: &[i64]) -> CenResult<Vec<u8>> {
     let codec = codec_for(enc);
     let mut bytes = codec.encode(vals)?;
     // The codec prepends a discriminant byte for self-describing streams, but
@@ -138,7 +140,7 @@ pub fn encode_minipage(enc: Encoding, vals: &[i64]) -> HexResult<Vec<u8>> {
 }
 
 /// Decode a minipage whose encoding is known from the column directory.
-pub fn decode_minipage(enc: Encoding, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+pub fn decode_minipage(enc: Encoding, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
     let codec = codec_for(enc);
     // Re-prepend the discriminant byte so the codec's decoder is happy.
     let mut owned = Vec::with_capacity(bytes.len() + 1);
@@ -154,7 +156,7 @@ pub fn decode_minipage(enc: Encoding, bytes: &[u8], count: usize) -> HexResult<V
 pub struct RawCodec;
 
 impl EncodingCodec for RawCodec {
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>> {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
         let mut out = Vec::with_capacity(1 + vals.len() * 8);
         out.push(Encoding::Raw.discriminant());
         for v in vals {
@@ -163,14 +165,14 @@ impl EncodingCodec for RawCodec {
         Ok(out)
     }
 
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
         let body = &bytes[1..]; // skip discriminant
         let need = count * 8;
         if body.len() < need {
-            return Err(HexError::corrupt(format!(
+            return Err(CenError::corrupt(format!(
                 "Raw decode: need {need} bytes, got {}",
                 body.len()
             )));
@@ -196,12 +198,12 @@ impl EncodingCodec for RawCodec {
 pub struct BitPackedCodec;
 
 impl EncodingCodec for BitPackedCodec {
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>> {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
         // Determine the minimum bit width that fits all values.
         let mut max_val: u64 = 0;
         for &v in vals {
             if v < 0 {
-                return Err(HexError::constraint(
+                return Err(CenError::constraint(
                     "BitPacked does not support negative values",
                 ));
             }
@@ -230,9 +232,9 @@ impl EncodingCodec for BitPackedCodec {
         Ok(out)
     }
 
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
         if bytes.len() < 2 {
-            return Err(HexError::corrupt("BitPacked decode: short header"));
+            return Err(CenError::corrupt("BitPacked decode: short header"));
         }
         let bits = bytes[1] as u32;
         // Clamp bits to valid range to prevent shift overflow on
@@ -278,7 +280,7 @@ fn required_bits(max_val: u64) -> u32 {
 pub struct FrameOfReferenceCodec;
 
 impl EncodingCodec for FrameOfReferenceCodec {
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>> {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
         if vals.is_empty() {
             return Ok(vec![Encoding::FrameOfReference { base: 0, bits: 0 }.discriminant()]);
         }
@@ -293,7 +295,9 @@ impl EncodingCodec for FrameOfReferenceCodec {
             }
         }
         let base = min_v;
-        let range = (max_v - min_v) as u64;
+        // Use i128 to avoid overflow when min_v is i64::MIN and max_v is
+        // large. E.g. min_v = i64::MIN, max_v = 0: max_v - min_v overflows i64.
+        let range = (max_v as i128 - min_v as i128) as u64;
         let bits = required_bits(range).max(1) as u8;
         let mut out = Vec::with_capacity(10 + ((vals.len() * bits as usize + 7) / 8));
         out.push(Encoding::FrameOfReference { base, bits }.discriminant());
@@ -302,7 +306,9 @@ impl EncodingCodec for FrameOfReferenceCodec {
         let mut bit_buf: u64 = 0;
         let mut bits_in_buf: u32 = 0;
         for &v in vals {
-            let residual = (v - base) as u64 & ((1u64 << bits) - 1).max(1);
+            // Use wrapping_sub to avoid overflow when v - base exceeds i64 range.
+            // The result is then masked to `bits` bits, so wrapping is correct.
+            let residual = (v.wrapping_sub(base)) as u64 & ((1u64 << bits) - 1).max(1);
             bit_buf |= residual << bits_in_buf;
             bits_in_buf += bits as u32;
             while bits_in_buf >= 8 {
@@ -317,9 +323,9 @@ impl EncodingCodec for FrameOfReferenceCodec {
         Ok(out)
     }
 
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
         if bytes.len() < 10 {
-            return Err(HexError::corrupt("FoR decode: short header"));
+            return Err(CenError::corrupt("FoR decode: short header"));
         }
         let base = i64::from_le_bytes([
             bytes[1], bytes[2], bytes[3], bytes[4],
@@ -362,7 +368,7 @@ impl EncodingCodec for FrameOfReferenceCodec {
 pub struct DeltaOfDeltaCodec;
 
 impl EncodingCodec for DeltaOfDeltaCodec {
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>> {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
         let mut out = Vec::with_capacity(1 + vals.len() * 2);
         out.push(Encoding::DeltaOfDelta.discriminant());
         if vals.is_empty() {
@@ -373,20 +379,20 @@ impl EncodingCodec for DeltaOfDeltaCodec {
         if vals.len() == 1 {
             return Ok(out);
         }
-        let mut prev_delta = vals[1] - vals[0];
+        let mut prev_delta = vals[1].wrapping_sub(vals[0]);
         out.extend_from_slice(&prev_delta.to_le_bytes());
         for i in 2..vals.len() {
-            let delta = vals[i] - vals[i - 1];
-            let dod = delta - prev_delta;
+            let delta = vals[i].wrapping_sub(vals[i - 1]);
+            let dod = delta.wrapping_sub(prev_delta);
             prev_delta = delta;
             // zig-zag varint
-            let zz = ((dod << 1) ^ (dod >> 63)) as u64;
+            let zz = ((dod.wrapping_shl(1)) ^ (dod >> 63)) as u64;
             varint_encode(&mut out, zz);
         }
         Ok(out)
     }
 
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
@@ -395,7 +401,7 @@ impl EncodingCodec for DeltaOfDeltaCodec {
             return Ok(Vec::new());
         }
         if bytes.len() < cursor + 8 {
-            return Err(HexError::corrupt("DoD decode: short first value"));
+            return Err(CenError::corrupt("DoD decode: short first value"));
         }
         let first = i64::from_le_bytes([
             bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
@@ -408,7 +414,7 @@ impl EncodingCodec for DeltaOfDeltaCodec {
             return Ok(out);
         }
         if bytes.len() < cursor + 8 {
-            return Err(HexError::corrupt("DoD decode: short first delta"));
+            return Err(CenError::corrupt("DoD decode: short first delta"));
         }
         let mut prev_delta = i64::from_le_bytes([
             bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
@@ -418,7 +424,7 @@ impl EncodingCodec for DeltaOfDeltaCodec {
         out.push(first.wrapping_add(prev_delta));
         for _ in 2..count {
             let (zz, used) = varint_decode(&bytes[cursor..])
-                .ok_or_else(|| HexError::corrupt("DoD decode: truncated varint"))?;
+                .ok_or_else(|| CenError::corrupt("DoD decode: truncated varint"))?;
             cursor += used;
             let dod = ((zz >> 1) as i64) ^ -((zz & 1) as i64);
             let delta = prev_delta.wrapping_add(dod);
@@ -462,7 +468,7 @@ fn varint_decode(bytes: &[u8]) -> Option<(u64, usize)> {
 pub struct RunLengthCodec;
 
 impl EncodingCodec for RunLengthCodec {
-    fn encode(&self, vals: &[i64]) -> HexResult<Vec<u8>> {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
         let mut out = Vec::with_capacity(1 + vals.len() * 4);
         out.push(Encoding::RunLength.discriminant());
         if vals.is_empty() {
@@ -486,7 +492,7 @@ impl EncodingCodec for RunLengthCodec {
         Ok(out)
     }
 
-    fn decode(&self, bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
@@ -514,6 +520,255 @@ impl EncodingCodec for RunLengthCodec {
 }
 
 // ============================================================================
+// Dictionary encoding — build a sorted dictionary of distinct values, then
+// bit-pack the per-row code indices. Optimal for low-to-medium-cardinality
+// integer columns (enums, country codes, status flags, categories).
+//
+// On-disk format:
+//   [discriminant: 1 byte]
+//   [dict_len: u32 LE]                    — number of distinct values
+//   [dict values: dict_len × 8 bytes]     — sorted distinct i64 values
+//   [bits: 1 byte]                        — bits per code
+//   [packed codes: ceil(count × bits / 8) bytes]
+//
+// For a column with 200 distinct values in 100K rows (raw 800 KB):
+//   - dict: 200 × 8 = 1.6 KB
+//   - codes: 100K × 8 bits = 100 KB
+//   - total: ~102 KB → 7.8× compression
+// Compare to BitPacked on the same data: also ~100 KB but no dictionary
+// overhead, so Dictionary wins only when cardinality is low enough that
+// the dictionary cost is amortized. The auto-selector picks Dictionary
+// when cardinality ≤ 1% of row count AND cardinality ≤ 4096.
+// ============================================================================
+
+pub struct DictionaryCodec;
+
+impl EncodingCodec for DictionaryCodec {
+    fn encode(&self, vals: &[i64]) -> CenResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(1 + 8 + vals.len());
+        out.push(Encoding::Dictionary { dict_id: 0 }.discriminant());
+
+        if vals.is_empty() {
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.push(0); // bits
+            return Ok(out);
+        }
+
+        // Build sorted dictionary of distinct values. We collect into a
+        // Vec and sort+dedup — O(n log n) but with a single allocation.
+        let mut dict: Vec<i64> = vals.to_vec();
+        dict.sort_unstable();
+        dict.dedup();
+        let dict_len = dict.len() as u32;
+        out.extend_from_slice(&dict_len.to_le_bytes());
+        out.reserve(dict.len() * 8 + vals.len() / 2);
+        for &v in &dict {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+
+        // Build value → code lookup via HashMap for O(1) lookup.
+        let bits = required_bits(dict.len() as u64);
+        out.push(bits as u8);
+
+        let mut code_map: std::collections::HashMap<i64, u64> = std::collections::HashMap::with_capacity(dict.len());
+        for (i, &v) in dict.iter().enumerate() {
+            code_map.insert(v, i as u64);
+        }
+
+        // Fast path: if bits is a multiple of 8, we can pack codes
+        // directly into bytes without the bit-by-bit BitWriter.
+        if bits % 8 == 0 {
+            let bytes_per_code = bits as usize / 8;
+            match bytes_per_code {
+                1 => {
+                    let mut codes = Vec::with_capacity(vals.len());
+                    for &v in vals {
+                        codes.push(*code_map.get(&v).unwrap_or(&0) as u8);
+                    }
+                    out.extend_from_slice(&codes);
+                }
+                2 => {
+                    let mut codes = Vec::with_capacity(vals.len() * 2);
+                    for &v in vals {
+                        let c = *code_map.get(&v).unwrap_or(&0) as u16;
+                        codes.extend_from_slice(&c.to_le_bytes());
+                    }
+                    out.extend_from_slice(&codes);
+                }
+                4 => {
+                    let mut codes = Vec::with_capacity(vals.len() * 4);
+                    for &v in vals {
+                        let c = *code_map.get(&v).unwrap_or(&0) as u32;
+                        codes.extend_from_slice(&c.to_le_bytes());
+                    }
+                    out.extend_from_slice(&codes);
+                }
+                8 => {
+                    let mut codes = Vec::with_capacity(vals.len() * 8);
+                    for &v in vals {
+                        let c = *code_map.get(&v).unwrap_or(&0);
+                        codes.extend_from_slice(&c.to_le_bytes());
+                    }
+                    out.extend_from_slice(&codes);
+                }
+                _ => {
+                    // Fall through to slow path for larger codes.
+                    let mut bit_writer = BitWriter::new();
+                    for &v in vals {
+                        let code = *code_map.get(&v).unwrap_or(&0);
+                        bit_writer.write_bits(code, bits as u32);
+                    }
+                    out.extend_from_slice(&bit_writer.into_bytes());
+                }
+            }
+        } else {
+            // Slow path: bit-by-bit packing for non-byte-aligned sizes.
+            let mut bit_writer = BitWriter::new();
+            for &v in vals {
+                let code = *code_map.get(&v).unwrap_or(&0);
+                bit_writer.write_bits(code, bits as u32);
+            }
+            out.extend_from_slice(&bit_writer.into_bytes());
+        }
+        Ok(out)
+    }
+
+    fn decode(&self, bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = &bytes[1..]; // skip discriminant
+        if body.len() < 5 {
+            return Err(CenError::corrupt("dictionary: truncated header"));
+        }
+        let dict_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+        // Layout: [dict_len:4][dict values: dict_len*8][bits:1][codes]
+        let bits_offset = 4 + dict_len * 8;
+        if body.len() < bits_offset + 1 {
+            return Err(CenError::corrupt("dictionary: truncated (missing bits byte)"));
+        }
+        let bits = body[bits_offset];
+        let dict: Vec<i64> = (0..dict_len)
+            .map(|i| {
+                let off = 4 + i * 8;
+                i64::from_le_bytes([
+                    body[off], body[off + 1], body[off + 2], body[off + 3],
+                    body[off + 4], body[off + 5], body[off + 6], body[off + 7],
+                ])
+            })
+            .collect();
+        let packed = &body[bits_offset + 1..];
+        let mut out = Vec::with_capacity(count);
+
+        // Fast path: byte-aligned codes.
+        if bits % 8 == 0 {
+            let bytes_per_code = bits as usize / 8;
+            match bytes_per_code {
+                0 => {
+                    // Single-value dictionary: every value is dict[0].
+                    for _ in 0..count {
+                        out.push(dict[0]);
+                    }
+                }
+                1 => {
+                    if packed.len() < count {
+                        return Err(CenError::corrupt("dictionary: truncated 1-byte codes"));
+                    }
+                    for i in 0..count {
+                        let code = packed[i] as usize;
+                        if code < dict.len() {
+                            out.push(dict[code]);
+                        } else {
+                            return Err(CenError::corrupt("dictionary: code out of range"));
+                        }
+                    }
+                }
+                2 => {
+                    if packed.len() < count * 2 {
+                        return Err(CenError::corrupt("dictionary: truncated 2-byte codes"));
+                    }
+                    for i in 0..count {
+                        let off = i * 2;
+                        let code = u16::from_le_bytes([packed[off], packed[off + 1]]) as usize;
+                        if code < dict.len() {
+                            out.push(dict[code]);
+                        } else {
+                            return Err(CenError::corrupt("dictionary: code out of range"));
+                        }
+                    }
+                }
+                4 => {
+                    if packed.len() < count * 4 {
+                        return Err(CenError::corrupt("dictionary: truncated 4-byte codes"));
+                    }
+                    for i in 0..count {
+                        let off = i * 4;
+                        let code = u32::from_le_bytes([
+                            packed[off], packed[off + 1], packed[off + 2], packed[off + 3]
+                        ]) as usize;
+                        if code < dict.len() {
+                            out.push(dict[code]);
+                        } else {
+                            return Err(CenError::corrupt("dictionary: code out of range"));
+                        }
+                    }
+                }
+                8 => {
+                    if packed.len() < count * 8 {
+                        return Err(CenError::corrupt("dictionary: truncated 8-byte codes"));
+                    }
+                    for i in 0..count {
+                        let off = i * 8;
+                        let code = u64::from_le_bytes([
+                            packed[off], packed[off + 1], packed[off + 2], packed[off + 3],
+                            packed[off + 4], packed[off + 5], packed[off + 6], packed[off + 7],
+                        ]) as usize;
+                        if code < dict.len() {
+                            out.push(dict[code]);
+                        } else {
+                            return Err(CenError::corrupt("dictionary: code out of range"));
+                        }
+                    }
+                }
+                _ => {
+                    // Fall through to slow path.
+                    let mut reader = BitReader::new(packed);
+                    for _ in 0..count {
+                        let code = reader.read_bits(bits as u32).ok_or_else(|| {
+                            CenError::corrupt("dictionary: truncated codes")
+                        })?;
+                        let code = code as usize;
+                        if code < dict.len() {
+                            out.push(dict[code]);
+                        } else {
+                            return Err(CenError::corrupt("dictionary: code out of range"));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Slow path: bit-by-bit unpacking.
+            let mut reader = BitReader::new(packed);
+            for _ in 0..count {
+                let code = reader.read_bits(bits as u32).ok_or_else(|| {
+                    CenError::corrupt(&format!(
+                        "dictionary: truncated codes at val {} (bits={}, packed_len={}, dict_len={})",
+                        out.len(), bits, packed.len(), dict_len
+                    ))
+                })?;
+                let code = code as usize;
+                if code < dict.len() {
+                    out.push(dict[code]);
+                } else {
+                    return Err(CenError::corrupt("dictionary: code out of range"));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+// ============================================================================
 // Gorilla XOR — encode f64 values as XOR-of-previous with a compact
 // control-bit scheme. Used for time-series floats where consecutive values
 // are similar (e.g. temperatures, prices).
@@ -529,7 +784,7 @@ impl EncodingCodec for RunLengthCodec {
 //                       - 6 bits: meaningful bit count
 //                       - meaningful bits of XOR
 //
-// For the prototype we operate on the bit-representation of f64 (i64 alias).
+// For this implementation we operate on the bit-representation of f64 (i64 alias).
 // The first value is stored verbatim (8 bytes).
 // ============================================================================
 
@@ -587,24 +842,24 @@ pub fn gorilla_encode(vals: &[i64]) -> Vec<u8> {
 }
 
 /// Decode Gorilla XOR bytes back into i64 values.
-pub fn gorilla_decode(bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
+pub fn gorilla_decode(bytes: &[u8], count: usize) -> CenResult<Vec<i64>> {
     if count == 0 {
         return Ok(Vec::new());
     }
     let mut reader = BitReader::new(bytes);
     let mut out = Vec::with_capacity(count);
-    let first = reader.read_bits(64).ok_or_else(|| HexError::corrupt("Gorilla: short first value"))?;
+    let first = reader.read_bits(64).ok_or_else(|| CenError::corrupt("Gorilla: short first value"))?;
     out.push(first as i64);
     let mut prev = first;
     let mut prev_leading = i64::MAX as u32;
     let mut prev_trailing = 0u32;
     while out.len() < count {
-        let bit = reader.read_bit().ok_or_else(|| HexError::corrupt("Gorilla: truncated"))?;
+        let bit = reader.read_bit().ok_or_else(|| CenError::corrupt("Gorilla: truncated"))?;
         if !bit {
             out.push(prev as i64);
             continue;
         }
-        let bit = reader.read_bit().ok_or_else(|| HexError::corrupt("Gorilla: truncated"))?;
+        let bit = reader.read_bit().ok_or_else(|| CenError::corrupt("Gorilla: truncated"))?;
         let (mut leading, mut meaningful, trailing);
         if !bit {
             // Reuse previous block. Use wrapping_sub to match release-mode
@@ -614,11 +869,11 @@ pub fn gorilla_decode(bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
             trailing = prev_trailing;
             meaningful = (64u32).wrapping_sub(leading).wrapping_sub(trailing);
         } else {
-            leading = reader.read_bits(5).ok_or_else(|| HexError::corrupt("Gorilla: short leading"))? as u32;
+            leading = reader.read_bits(5).ok_or_else(|| CenError::corrupt("Gorilla: short leading"))? as u32;
             if leading == 31 {
                 leading = 32;
             }
-            meaningful = reader.read_bits(6).ok_or_else(|| HexError::corrupt("Gorilla: short meaningful"))? as u32;
+            meaningful = reader.read_bits(6).ok_or_else(|| CenError::corrupt("Gorilla: short meaningful"))? as u32;
             if meaningful == 0 {
                 // Original placeholder: 64 - 2*leading. Use wrapping to
                 // match release-mode behavior.
@@ -634,7 +889,7 @@ pub fn gorilla_decode(bytes: &[u8], count: usize) -> HexResult<Vec<i64>> {
             out.push(prev as i64);
             continue;
         }
-        let xor_meaningful = reader.read_bits(meaningful as u32).ok_or_else(|| HexError::corrupt("Gorilla: short xor"))?;
+        let xor_meaningful = reader.read_bits(meaningful as u32).ok_or_else(|| CenError::corrupt("Gorilla: short xor"))?;
         let xor = if trailing < 64 {
             xor_meaningful << trailing
         } else {
@@ -722,22 +977,86 @@ impl<'a> BitReader<'a> {
 
 /// Auto-select the best encoding for an i64 column based on its observed
 /// values. Implements the heuristics from §4.1.1 of the spec.
+///
+/// Phase 3 improvements:
+///   - Added Dictionary encoding selection for low-cardinality columns.
+///   - Relaxed DeltaOfDelta: now picks it for *mostly* monotonic data
+///     (drift up or down over time), not just strictly monotonic.
 pub fn auto_select_encoding_i64(vals: &[i64]) -> Encoding {
     if vals.len() < 2 {
         return Encoding::Raw;
     }
-    // Check monotonicity (for DeltaOfDelta).
-    let mut monotonic = true;
-    for i in 1..vals.len() {
-        if vals[i] < vals[i - 1] {
-            monotonic = false;
-            break;
+
+    // ---- Phase 3: Dictionary encoding for low-cardinality columns ----
+    // Compute cardinality. For very large columns we sample to keep this O(1).
+    let sample_size = vals.len().min(10_000);
+    let mut sample: Vec<i64> = if vals.len() <= 10_000 {
+        vals.to_vec()
+    } else {
+        // Stride sample to get a representative subset.
+        let stride = vals.len() / 10_000;
+        vals.iter().step_by(stride).copied().collect()
+    };
+    sample.sort_unstable();
+    sample.dedup();
+    let sampled_cardinality = sample.len();
+    let cardinality = if vals.len() <= 10_000 {
+        sampled_cardinality
+    } else {
+        // Extrapolate: sampled_cardinality / sample_size * vals.len(),
+        // but cap at vals.len() (can't exceed distinct count).
+        let est = (sampled_cardinality as u128 * vals.len() as u128 / sample_size as u128) as usize;
+        est.min(vals.len())
+    };
+    // Dictionary wins when cardinality is low relative to row count.
+    // Threshold: cardinality ≤ 1% of rows AND cardinality ≤ 4096.
+    if cardinality <= 4096 && cardinality as f64 / vals.len() as f64 <= 0.01 {
+        let bits = required_bits(cardinality as u64);
+        if bits <= 12 {
+            return Encoding::Dictionary { dict_id: 0 };
         }
     }
-    if monotonic {
+
+    // ---- DeltaOfDelta for monotonic OR mostly-monotonic data ----
+    // Phase 3 fix: the original required strict monotonicity, which
+    // excluded random-walk data (financial ticks) where values drift
+    // up/down over time but have small local noise. We now also accept
+    // "mostly monotonic" — defined as:
+    //   1. ≥80% of consecutive pairs are non-decreasing OR non-increasing, AND
+    //   2. The overall trend (last - first) is non-zero (net change), AND
+    //   3. The data range is large enough that DoD's bit savings beat
+    //      BitPacked. DoD uses ~1 bit/value for monotonic data, but
+    //      BitPacked uses `bits` bits where bits = log2(range). For
+    //      small ranges (≤16 bits), BitPacked is competitive or better.
+    //      So we only pick DoD for mostly-monotonic data when the range
+    //      exceeds 16 bits.
+    // Condition 3 excludes cycling sequences like 0,1,2,...,7,0,1,2,...
+    // which have a small range and are better served by BitPacked.
+    let mut non_dec_pairs = 0usize;
+    let mut non_inc_pairs = 0usize;
+    let mut total_pairs = 0usize;
+    for i in 1..vals.len() {
+        total_pairs += 1;
+        if vals[i] >= vals[i - 1] { non_dec_pairs += 1; }
+        if vals[i] <= vals[i - 1] { non_inc_pairs += 1; }
+    }
+    let strictly_inc = non_dec_pairs == total_pairs;
+    let strictly_dec = non_inc_pairs == total_pairs;
+    let strictly_monotonic = strictly_inc || strictly_dec;
+    let pair_ratio = (non_dec_pairs.max(non_inc_pairs) as f64) / total_pairs as f64;
+    let net_trend = vals[vals.len() - 1].wrapping_sub(vals[0]);
+    // Compute range for condition 3.
+    let mut min_v = vals[0];
+    let mut max_v = vals[0];
+    for &v in vals {
+        if v < min_v { min_v = v; }
+        if v > max_v { max_v = v; }
+    }
+    let range = (max_v as i128 - min_v as i128) as u64;
+    let range_bits = if range == 0 { 0 } else { 64 - range.leading_zeros() };
+    let mostly_monotonic = pair_ratio >= 0.80 && net_trend != 0 && range_bits > 16;
+    if strictly_monotonic || mostly_monotonic {
         // Constant-delta sequences compress to ~0 bits/value with DoD.
-        // Use wrapping_sub for safety: the delta might overflow if vals
-        // span the full i64 range, but we only compare for equality.
         let mut all_same_delta = true;
         let first_delta = vals[1].wrapping_sub(vals[0]);
         for i in 2..vals.len() {
@@ -750,26 +1069,16 @@ pub fn auto_select_encoding_i64(vals: &[i64]) -> Encoding {
             return Encoding::DeltaOfDelta;
         }
     }
-    // Check if range fits in few bits → BitPacked. Only valid for
-    // non-negative values.
-    let mut min_v = vals[0];
-    let mut max_v = vals[0];
-    for &v in vals {
-        if v < min_v {
-            min_v = v;
-        }
-        if v > max_v {
-            max_v = v;
-        }
-    }
+
+    // ---- BitPacked for small-range non-negative integers ----
+    // (min_v and max_v already computed above for the DoD range check.)
     if min_v >= 0 {
         let bits = required_bits(max_v as u64);
         if bits <= 16 {
             return Encoding::BitPacked { bits: bits as u8 };
         }
     }
-    // Clustered integers → FrameOfReference. Compute range as u64 to avoid
-    // overflow when min_v is i64::MIN and max_v is i64::MAX.
+    // ---- FrameOfReference for clustered integers ----
     if min_v >= 0 || max_v < 0 || (max_v as i128 - min_v as i128) < (1i128 << 32) {
         let range = (max_v as i128 - min_v as i128) as u64;
         if range > 0 && range < (1u64 << 32) {
@@ -829,6 +1138,57 @@ mod tests {
         );
         let dec = codec.decode(&enc, vals.len()).unwrap();
         assert_eq!(dec, vals);
+    }
+
+    #[test]
+    fn dictionary_roundtrip_low_cardinality() {
+        // 200 distinct values in 10K rows — typical enum column.
+        let vals: Vec<i64> = (0..10_000).map(|i| (i % 200) as i64).collect();
+        let codec = DictionaryCodec;
+        let enc = codec.encode(&vals).unwrap();
+        let dec = codec.decode(&enc, vals.len()).unwrap();
+        assert_eq!(dec, vals);
+        // Should compress well: 200 × 8 = 1.6 KB dict + 10K × 8 bits = 10 KB codes = ~11.6 KB
+        // vs raw 80 KB → ~6.9× ratio.
+        assert!(enc.len() < vals.len() * 4, "dictionary encoding did not compress: {} bytes raw {}",
+                enc.len(), vals.len() * 8);
+    }
+
+    #[test]
+    fn dictionary_roundtrip_high_cardinality() {
+        // 1000 distinct values in 100K rows.
+        let vals: Vec<i64> = (0..100_000).map(|i| (i % 1000) as i64).collect();
+        let codec = DictionaryCodec;
+        let enc = codec.encode(&vals).unwrap();
+        let dec = codec.decode(&enc, vals.len()).unwrap();
+        assert_eq!(dec, vals);
+    }
+
+    #[test]
+    fn dictionary_handles_empty() {
+        let codec = DictionaryCodec;
+        let enc = codec.encode(&[]).unwrap();
+        let dec = codec.decode(&enc, 0).unwrap();
+        assert_eq!(dec, Vec::<i64>::new());
+    }
+
+    #[test]
+    fn dictionary_handles_single_value() {
+        let vals = vec![42i64; 100];
+        let codec = DictionaryCodec;
+        let enc = codec.encode(&vals).unwrap();
+        println!("encoded {} bytes for {} single-value vals", enc.len(), vals.len());
+        let dec = codec.decode(&enc, vals.len()).unwrap();
+        assert_eq!(dec, vals);
+    }
+
+    #[test]
+    fn auto_select_picks_dictionary_for_low_cardinality() {
+        // 200 distinct values in 100K rows (0.2% cardinality) → Dictionary.
+        let vals: Vec<i64> = (0..100_000).map(|i| (i % 200) as i64).collect();
+        let enc = auto_select_encoding_i64(&vals);
+        assert!(matches!(enc, Encoding::Dictionary { .. }),
+                "expected Dictionary for low-cardinality column, got {:?}", enc);
     }
 
     #[test]

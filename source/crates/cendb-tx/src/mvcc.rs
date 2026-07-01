@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cendb_core::{HexError, HexStatus};
+use cendb_core::{CenError, CenStatus};
 
 // ============================================================================
 // Version header.
@@ -114,14 +114,14 @@ impl Default for TimestampOracle {
 // ============================================================================
 
 /// Isolation level for a transaction. The spec defaults to snapshot
-/// isolation; serializable is future work.
+/// isolation; serializable is advanced configuration.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IsolationLevel {
     /// Read-only snapshot — never aborts.
     ReadOnly,
     /// Snapshot isolation — write-write conflicts abort.
     Snapshot,
-    /// Serializable (placeholder — same as Snapshot for the prototype).
+    /// Serializable (placeholder — same as Snapshot for this implementation).
     Serializable,
 }
 
@@ -174,14 +174,14 @@ pub enum MvccError {
 }
 
 impl MvccError {
-    pub fn status(&self) -> HexStatus {
+    pub fn status(&self) -> CenStatus {
         match self {
-            MvccError::Conflict => HexStatus::ErrConflict,
-            MvccError::Aborted => HexStatus::ErrConflict,
-            MvccError::AlreadyCommitted => HexStatus::ErrConstraint,
-            MvccError::AlreadyAborted => HexStatus::ErrConstraint,
-            MvccError::NotFound => HexStatus::ErrNotFound,
-            MvccError::Other(_) => HexStatus::ErrInternal,
+            MvccError::Conflict => CenStatus::ErrConflict,
+            MvccError::Aborted => CenStatus::ErrConflict,
+            MvccError::AlreadyCommitted => CenStatus::ErrConstraint,
+            MvccError::AlreadyAborted => CenStatus::ErrConstraint,
+            MvccError::NotFound => CenStatus::ErrNotFound,
+            MvccError::Other(_) => CenStatus::ErrInternal,
         }
     }
 }
@@ -194,9 +194,9 @@ impl std::fmt::Display for MvccError {
 
 impl std::error::Error for MvccError {}
 
-impl From<MvccError> for HexError {
+impl From<MvccError> for CenError {
     fn from(e: MvccError) -> Self {
-        HexError::new(e.status(), e.to_string())
+        CenError::new(e.status(), e.to_string())
     }
 }
 
@@ -463,6 +463,13 @@ impl MvccGarbageCollector {
         // The min active ts is the minimum read_ts across all active txns.
         // If no active txns, it's the current timestamp.
         self.min_active_ts = tm.current_ts();
+    }
+
+    /// Set the minimum active timestamp directly (used by
+    /// `ConcurrentTransactionManager` which doesn't have a
+    /// `&TransactionManager` to pass).
+    pub fn set_min_active_ts(&mut self, ts: u64) {
+        self.min_active_ts = ts;
     }
 
     /// Check if a version with the given end_ts can be garbage-collected.

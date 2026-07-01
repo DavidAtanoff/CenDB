@@ -38,10 +38,14 @@
 //! These operate on `&[i64]` / `&[f64]` slices and produce selection
 //! vectors or scalar aggregates.
 
-pub mod vector;
+pub mod join;
 pub mod morsel;
+pub mod subquery;
+pub mod vector;
 
+pub use join::{auto_join, auto_select_method, hash_join, join, merge_join, nested_loop_join, JoinMethod};
 pub use morsel::{Morsel, MorselBatch};
+pub use subquery::{execute_pipeline, InMemoryProvider, TableProvider};
 pub use vector::{
     filter_f64_gt, filter_f64_lt, filter_i64_eq, filter_i64_ge, filter_i64_gt, filter_i64_le,
     filter_i64_lt, filter_i64_ne, sum_f64, sum_i64, SelectionVector,

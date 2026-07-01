@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # windows-latest omitted — cendb-net uses POSIX-only APIs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: source/target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build
+        working-directory: source
+        run: cargo build --workspace --verbose
+
+      - name: Run tests
+        working-directory: source
+        run: cargo test --workspace --verbose
+
+      - name: Run Phase 1 crash harness
+        working-directory: source
+        run: cargo test -p cendb-chaos disk_crash -- --nocapture --test-threads=1
+
+      - name: Run concurrent stress tests
+        working-directory: source
+        run: cargo test -p cendb-tx concurrent_stress -- --nocapture
+
+      - name: Run fuzzer
+        working-directory: source
+        run: cargo test -p cendb-tx fuzz_ -- --nocapture
+
+      - name: Run FFI boundary fuzzer
+        working-directory: source
+        run: cargo test -p cendb-ffi --test fuzz_boundary -- --nocapture
+
+      - name: Run Phase 2 compression benchmarks
+        working-directory: source
+        run: cargo test -p cendb --test phase2_compression -- --nocapture
+
+      - name: Run Phase 3 latency benchmarks
+        working-directory: source
+        run: cargo test -p cendb --test phase3_latency -- --nocapture
+
+  security-audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run audit
+        working-directory: source
+        run: cargo audit
+
+  docs:
+    name: Deploy docs to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs-site
+      - id: deployment
+        uses: actions/deploy-pages@v4

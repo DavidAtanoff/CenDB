@@ -41,8 +41,13 @@ pub mod cost;
 pub mod plan;
 pub mod stats;
 
-pub use cost::{Cost, CostModel};
-pub use plan::{
-    JoinMethod, LogicalPlan, Optimizer, PhysicalOperator, PhysicalPlan, PlanNode,
+pub use cost::{
+    filter_cost, hash_join_cost, index_lookup_cost, merge_join_cost, nested_loop_join_cost,
+    seq_scan_cost, sort_cost, Cost, CostModel,
 };
-pub use stats::{ColumnStats, TableStats, StatsCatalog};
+pub use plan::{
+    cenql_to_logical, choose_join_method_spec, choose_scan_op, explain, explain_analyze,
+    is_equi_join, physical_plan, push_down_filters, JoinMethod, LogicalPlan, Optimizer,
+    PhysicalOperator, PhysicalPlan, PlanNode,
+};
+pub use stats::{ColumnStats, Histogram, HyperLogLog, StatsCatalog, TableStats};

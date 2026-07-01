@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use cendb_core::{BlockId, HexError, HexResult, SegmentId, Value, ValueKind};
+use cendb_core::{BlockId, CenError, CenResult, SegmentId, Value, ValueKind};
 use cendb_storage::header::ColumnSpec;
 use cendb_storage::pax::{PaxBlock, PaxBlockBuilder};
 
@@ -52,12 +52,12 @@ pub struct RelationalTable {
 }
 
 impl RelationalTable {
-    pub fn new(schema: TableSchema, segment_id: SegmentId, block_size: u32) -> HexResult<Self> {
+    pub fn new(schema: TableSchema, segment_id: SegmentId, block_size: u32) -> CenResult<Self> {
         if schema.columns.is_empty() {
-            return Err(HexError::constraint("RelationalTable: schema must have >= 1 column"));
+            return Err(CenError::constraint("RelationalTable: schema must have >= 1 column"));
         }
         if schema.pk_index().is_none() {
-            return Err(HexError::constraint(
+            return Err(CenError::constraint(
                 "RelationalTable: schema must have a primary key column (mark one with .pk())",
             ));
         }
@@ -78,9 +78,9 @@ impl RelationalTable {
 
     /// Insert a row. The row's values must be in the same order as the
     /// schema's columns.
-    pub fn insert(&mut self, row: Vec<Value>) -> HexResult<()> {
+    pub fn insert(&mut self, row: Vec<Value>) -> CenResult<()> {
         if row.len() != self.schema.columns.len() {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "insert: expected {} values, got {}",
                 self.schema.columns.len(),
                 row.len()
@@ -94,7 +94,7 @@ impl RelationalTable {
     }
 
     /// Look up a row by primary key.
-    pub fn find_by_pk(&self, pk: i64) -> HexResult<Option<Vec<Value>>> {
+    pub fn find_by_pk(&self, pk: i64) -> CenResult<Option<Vec<Value>>> {
         // Check pending first.
         let pk_idx = self.schema.pk_index().unwrap();
         for row in self.pending.iter().rev() {
@@ -113,7 +113,7 @@ impl RelationalTable {
     }
 
     /// Flush pending rows into a new sealed PAX block.
-    pub fn flush_pending(&mut self) -> HexResult<()> {
+    pub fn flush_pending(&mut self) -> CenResult<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -142,7 +142,7 @@ impl RelationalTable {
     /// `Vec<i64>` for the column at `col_idx`. Used by analytical queries
     /// that only touch a subset of columns (the "columnar projection"
     /// benefit of PAX).
-    pub fn scan_column_i64(&self, col_idx: usize) -> HexResult<Vec<i64>> {
+    pub fn scan_column_i64(&self, col_idx: usize) -> CenResult<Vec<i64>> {
         let mut out = Vec::new();
         for block in &self.blocks {
             let vals = block.decode_i64_column(col_idx)?;
@@ -189,7 +189,7 @@ pub struct RelationalIter<'a> {
 }
 
 impl<'a> Iterator for RelationalIter<'a> {
-    type Item = HexResult<Vec<Value>>;
+    type Item = CenResult<Vec<Value>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.pending_idx < self.table.pending.len() {
@@ -222,7 +222,7 @@ impl RelationalProjection {
         block_size: u32,
         schema: &TableSchema,
         rows: I,
-    ) -> HexResult<PaxBlock>
+    ) -> CenResult<PaxBlock>
     where
         I: IntoIterator<Item = &'a [Value]>,
     {

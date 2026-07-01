@@ -117,13 +117,13 @@ impl VirtualTable {
         &mut self,
         col_name: &str,
         block_size: u32,
-    ) -> cendb_core::HexResult<()> {
+    ) -> cendb_core::CenResult<()> {
         use cendb_storage::header::ColumnSpec;
         use cendb_storage::pax::PaxBlockBuilder;
         use cendb_core::Value;
 
         let col_idx = self.columns.iter().position(|c| c.name == col_name)
-            .ok_or_else(|| cendb_core::HexError::not_found(format!("column {} not found", col_name)))?;
+            .ok_or_else(|| cendb_core::CenError::not_found(format!("column {} not found", col_name)))?;
 
         let col = &self.columns[col_idx];
         let spec = ColumnSpec::new(col_idx as u32, col.kind);

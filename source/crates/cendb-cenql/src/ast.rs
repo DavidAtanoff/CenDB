@@ -60,6 +60,10 @@ impl fmt::Display for CenqlPipeline {
 pub enum CenqlStage {
     /// `from <source>` — the data source.
     From { name: String },
+    /// `from (subquery)` — a subquery in the FROM clause. The subquery is
+    /// materialised first, then its rows feed the rest of the outer
+    /// pipeline.
+    FromSubquery { pipeline: Box<CenqlPipeline> },
     /// `filter <expr>` — keep rows where `expr` is true.
     Filter { expr: Expr },
     /// `select { col1, col2, ... }` — project to columns.
@@ -95,6 +99,7 @@ impl fmt::Display for CenqlStage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CenqlStage::From { name } => write!(f, "from {}", name),
+            CenqlStage::FromSubquery { pipeline } => write!(f, "from ({})", pipeline),
             CenqlStage::Filter { expr } => write!(f, "filter {}", expr),
             CenqlStage::Select { columns } => {
                 write!(f, "select {{ ")?;
@@ -175,6 +180,12 @@ pub enum Expr {
     },
     /// Function call, e.g. `count()`, `sum(col)`, `mean(col)`.
     Call { name: String, args: Vec<Expr> },
+    /// `value IN (subquery)` — membership test against a materialised
+    /// subquery's single-column result.
+    In {
+        value: Box<Expr>,
+        subquery: Box<CenqlPipeline>,
+    },
 }
 
 impl fmt::Display for Expr {
@@ -195,6 +206,9 @@ impl fmt::Display for Expr {
                     write!(f, "{}", a)?;
                 }
                 write!(f, ")")
+            }
+            Expr::In { value, subquery } => {
+                write!(f, "({} in ({}))", value, subquery)
             }
         }
     }
@@ -352,6 +366,217 @@ pub enum EdgeDirection {
     Out,
     In,
     Both,
+}
+
+// ============================================================================
+// Top-level statements (DDL, DML, queries, transactions).
+// ============================================================================
+
+/// A CenQL statement. This is the top-level parse result — a single
+/// statement can be a query (pipeline), DDL, DML, or transaction control.
+#[derive(Clone, Debug)]
+pub enum CenqlStatement {
+    /// A query pipeline: `from users | filter age > 18 | ...`
+    Query(CenqlPipeline),
+    /// `create table <name> { col1: type, col2: type, ... }`
+    CreateTable {
+        name: String,
+        columns: Vec<ColumnDef>,
+        primary_key: Option<String>,
+    },
+    /// `drop table <name>`
+    DropTable { name: String },
+    /// `create index <name> on <table>(<column>)`
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+    },
+    /// `drop index <name>`
+    DropIndex { name: String },
+    /// `insert into <table> { col1: val1, col2: val2, ... }`
+    Insert {
+        table: String,
+        values: Vec<(String, Expr)>,
+    },
+    /// `update <table> set col1 = val1, col2 = val2 where <expr>`
+    Update {
+        table: String,
+        assignments: Vec<(String, Expr)>,
+        where_clause: Option<Expr>,
+    },
+    /// `delete from <table> where <expr>`
+    Delete {
+        table: String,
+        where_clause: Option<Expr>,
+    },
+    /// `upsert into <table> { col1: val1, ... }` — insert or update
+    Upsert {
+        table: String,
+        values: Vec<(String, Expr)>,
+    },
+    /// `create view <name> as <pipeline>`
+    CreateView {
+        name: String,
+        pipeline: Box<CenqlPipeline>,
+    },
+    /// `drop view <name>`
+    DropView { name: String },
+    /// `begin` — start a transaction
+    Begin,
+    /// `commit` — commit the current transaction
+    Commit,
+    /// `rollback` — abort the current transaction
+    Rollback,
+    /// `with <name> as (<pipeline>) <pipeline>` — CTE
+    WithCte {
+        cte_name: String,
+        cte_pipeline: Box<CenqlPipeline>,
+        main_pipeline: Box<CenqlPipeline>,
+    },
+    /// `<pipeline> union <pipeline>` — set union
+    Union {
+        left: Box<CenqlPipeline>,
+        right: Box<CenqlPipeline>,
+        all: bool,
+    },
+    /// `<pipeline> intersect <pipeline>` — set intersection
+    Intersect {
+        left: Box<CenqlPipeline>,
+        right: Box<CenqlPipeline>,
+    },
+    /// `<pipeline> except <pipeline>` — set difference
+    Except {
+        left: Box<CenqlPipeline>,
+        right: Box<CenqlPipeline>,
+    },
+    /// `distinct <pipeline>` — deduplicate results
+    Distinct {
+        pipeline: Box<CenqlPipeline>,
+    },
+}
+
+impl fmt::Display for CenqlStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CenqlStatement::Query(p) => write!(f, "{}", p),
+            CenqlStatement::CreateTable { name, columns, primary_key } => {
+                write!(f, "create table {} {{ ", name)?;
+                for (i, c) in columns.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", c)?;
+                }
+                if let Some(pk) = primary_key {
+                    write!(f, ", primary_key: {}", pk)?;
+                }
+                write!(f, " }}")
+            }
+            CenqlStatement::DropTable { name } => write!(f, "drop table {}", name),
+            CenqlStatement::CreateIndex { name, table, column } => {
+                write!(f, "create index {} on {}({})", name, table, column)
+            }
+            CenqlStatement::DropIndex { name } => write!(f, "drop index {}", name),
+            CenqlStatement::Insert { table, values } => {
+                write!(f, "insert into {} {{ ", table)?;
+                for (i, (k, v)) in values.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, " }}")
+            }
+            CenqlStatement::Update { table, assignments, where_clause } => {
+                write!(f, "update {} set ", table)?;
+                for (i, (k, v)) in assignments.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{} = {}", k, v)?;
+                }
+                if let Some(w) = where_clause {
+                    write!(f, " where {}", w)?;
+                }
+                Ok(())
+            }
+            CenqlStatement::Delete { table, where_clause } => {
+                write!(f, "delete from {}", table)?;
+                if let Some(w) = where_clause {
+                    write!(f, " where {}", w)?;
+                }
+                Ok(())
+            }
+            CenqlStatement::Upsert { table, values } => {
+                write!(f, "upsert into {} {{ ", table)?;
+                for (i, (k, v)) in values.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, " }}")
+            }
+            CenqlStatement::CreateView { name, pipeline } => {
+                write!(f, "create view {} as {}", name, pipeline)
+            }
+            CenqlStatement::DropView { name } => write!(f, "drop view {}", name),
+            CenqlStatement::Begin => write!(f, "begin"),
+            CenqlStatement::Commit => write!(f, "commit"),
+            CenqlStatement::Rollback => write!(f, "rollback"),
+            CenqlStatement::WithCte { cte_name, cte_pipeline, main_pipeline } => {
+                write!(f, "with {} as ({}) {}", cte_name, cte_pipeline, main_pipeline)
+            }
+            CenqlStatement::Union { left, right, all } => {
+                if *all {
+                    write!(f, "{} union all {}", left, right)
+                } else {
+                    write!(f, "{} union {}", left, right)
+                }
+            }
+            CenqlStatement::Intersect { left, right } => {
+                write!(f, "{} intersect {}", left, right)
+            }
+            CenqlStatement::Except { left, right } => {
+                write!(f, "{} except {}", left, right)
+            }
+            CenqlStatement::Distinct { pipeline } => {
+                write!(f, "distinct {}", pipeline)
+            }
+        }
+    }
+}
+
+/// A column definition for `create table`.
+#[derive(Clone, Debug)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: ColumnType,
+    pub nullable: bool,
+}
+
+impl fmt::Display for ColumnDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let type_str = match self.data_type {
+            ColumnType::I64 => "i64",
+            ColumnType::F64 => "f64",
+            ColumnType::Str => "str",
+            ColumnType::Bool => "bool",
+            ColumnType::Bytes => "bytes",
+            ColumnType::Timestamp => "timestamp",
+            ColumnType::Json => "json",
+        };
+        write!(f, "{}: {}", self.name, type_str)?;
+        if !self.nullable {
+            write!(f, " not null")?;
+        }
+        Ok(())
+    }
+}
+
+/// Supported column types.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ColumnType {
+    I64,
+    F64,
+    Str,
+    Bool,
+    Bytes,
+    Timestamp,
+    Json,
 }
 
 #[cfg(test)]

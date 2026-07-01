@@ -67,7 +67,7 @@ use cendb_core::{SegmentId, Value, ValueKind};
 use cendb_projection::{KvStore, TimeSeriesSchema, TimeSeriesStore};
 use cendb_storage::header::ColumnSpec;
 
-fn main() -> HexResult<()> {
+fn main() -> CenResult<()> {
     // Key-Value store.
     let mut kv = KvStore::new(SegmentId(1), 64 * 1024);
     kv.put(b"alice", b"password123")?;
@@ -158,23 +158,23 @@ CGO_LDFLAGS="-L/path/to/cendb/target/release -lcendb_ffi" go build ./...
 #include <stdio.h>
 
 int main(void) {
-    HexDb* db = NULL;
-    HexConfig cfg = { .page_size = 4096, .block_size = 65536,
+    CenDb* db = NULL;
+    CenConfig cfg = { .page_size = 4096, .block_size = 65536,
                       .pool_frames = 1024, .group_commit_ms = 10, .flags = 0 };
-    if (hex_open(NULL, &cfg, &db) != HEX_OK) {
-        fprintf(stderr, "hex_open: %s\n", hex_last_error_message());
+    if (cendb_open(NULL, &cfg, &db) != CEN_OK) {
+        fprintf(stderr, "cendb_open: %s\n", cendb_last_error_message());
         return 1;
     }
 
-    hex_kv_put(db, (const uint8_t*)"alice", 5, (const uint8_t*)"password123", 11);
+    cendb_kv_put(db, (const uint8_t*)"alice", 5, (const uint8_t*)"password123", 11);
 
-    HexBytes val = {0};
-    if (hex_kv_get(db, (const uint8_t*)"alice", 5, &val) == HEX_OK) {
+    CenBytes val = {0};
+    if (cendb_kv_get(db, (const uint8_t*)"alice", 5, &val) == CEN_OK) {
         printf("value: %.*s\n", (int)val.len, val.ptr);
-        hex_bytes_free(&val);
+        cendb_bytes_free(&val);
     }
 
-    hex_close(db);
+    cendb_close(db);
     return 0;
 }
 ```

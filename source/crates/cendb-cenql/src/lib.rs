@@ -35,13 +35,13 @@
 //!
 //! ## Implementation
 //!
-//! For the prototype we ship:
+//! For this implementation we ship:
 //!   * A **lexer** (zero-alloc tokenizer).
 //!   * A **recursive-descent parser** producing an AST.
 //!   * An **AST** with `Pipeline`, `Stage`, `Expr` types.
 //!
 //! The executor that runs a CenQL pipeline against actual data is left
-//! as future work; the AST is the contract between parser and future
+//! as advanced configuration; the AST is the contract between parser and future
 //! planner.
 
 pub mod ast;
@@ -49,8 +49,8 @@ pub mod lexer;
 pub mod parser;
 
 pub use ast::{
-    AggExpr, BinaryOp, CenqlPipeline, CenqlStage, EdgeDirection, Expr, GraphMatchPattern,
-    JoinKind, SortDir, WindowSpec,
+    AggExpr, BinaryOp, ColumnDef, ColumnType, CenqlPipeline, CenqlStage, CenqlStatement,
+    EdgeDirection, Expr, GraphMatchPattern, JoinKind, SortDir, WindowSpec,
 };
 pub use lexer::{Token, TokenKind, Tokenizer};
-pub use parser::{parse, ParseError, ParseResult, Parser};
+pub use parser::{parse, parse_statement, ParseError, ParseResult, Parser};

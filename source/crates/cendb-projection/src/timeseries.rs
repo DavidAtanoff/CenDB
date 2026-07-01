@@ -8,7 +8,7 @@
 //! `WHERE ts BETWEEN X AND Y` this often reduces I/O from O(N blocks) to
 //! O(blocks overlapping [X, Y]).
 
-use cendb_core::{BlockId, HexResult, SegmentId, Value, ValueKind};
+use cendb_core::{BlockId, CenResult, SegmentId, Value, ValueKind};
 use cendb_storage::header::ColumnSpec;
 use cendb_storage::pax::{PaxBlock, PaxBlockBuilder};
 
@@ -82,7 +82,7 @@ impl TimeSeriesStore {
     }
 
     /// Append a single reading. Buffered until `pending_capacity` is hit.
-    pub fn append(&mut self, ts: i64, series_id: i64, value: f64) -> HexResult<()> {
+    pub fn append(&mut self, ts: i64, series_id: i64, value: f64) -> CenResult<()> {
         self.pending.push((ts, series_id, value));
         if self.pending.len() >= self.pending_capacity {
             self.flush_pending()?;
@@ -91,7 +91,7 @@ impl TimeSeriesStore {
     }
 
     /// Bulk-append a slice of readings.
-    pub fn append_batch(&mut self, readings: &[(i64, i64, f64)]) -> HexResult<()> {
+    pub fn append_batch(&mut self, readings: &[(i64, i64, f64)]) -> CenResult<()> {
         for &(ts, sid, v) in readings {
             self.append(ts, sid, v)?;
         }
@@ -99,7 +99,7 @@ impl TimeSeriesStore {
     }
 
     /// Flush pending readings into a new sealed PAX block.
-    pub fn flush_pending(&mut self) -> HexResult<()> {
+    pub fn flush_pending(&mut self) -> CenResult<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -153,7 +153,7 @@ impl TimeSeriesStore {
     /// per-block zone map to skip blocks that cannot contain matching rows.
     /// Returns the number of blocks *touched* (for verifying scan resistance
     /// in tests) and the decoded readings.
-    pub fn range_scan(&self, lo: i64, hi: i64) -> HexResult<(usize, Vec<(i64, i64, f64)>)> {
+    pub fn range_scan(&self, lo: i64, hi: i64) -> CenResult<(usize, Vec<(i64, i64, f64)>)> {
         let mut out = Vec::new();
         let mut touched = 0usize;
         for summary in &self.summaries {
@@ -192,7 +192,7 @@ impl TimeSeriesStore {
         series_id: i64,
         lo: i64,
         hi: i64,
-    ) -> HexResult<(usize, Vec<(i64, f64)>)> {
+    ) -> CenResult<(usize, Vec<(i64, f64)>)> {
         let mut out = Vec::new();
         let mut touched = 0usize;
         for summary in &self.summaries {
@@ -255,13 +255,13 @@ impl TimeSeriesStore {
 
     /// Seal the store (flush all pending writes into blocks). Mirrors
     /// [`KvStore::seal`] for API symmetry.
-    pub fn seal(&mut self) -> HexResult<()> {
+    pub fn seal(&mut self) -> CenResult<()> {
         self.flush_pending()
     }
 
     /// Persist all sealed blocks to a segment file on disk. Equivalent to
     /// [`KvStore::persist_to_segment`] for the time-series store.
-    pub fn persist_to_segment(&mut self, path: impl AsRef<std::path::Path>) -> HexResult<()> {
+    pub fn persist_to_segment(&mut self, path: impl AsRef<std::path::Path>) -> CenResult<()> {
         use cendb_storage::segment::SegmentWriter;
         self.flush_pending()?;
         let mut writer = SegmentWriter::create(
@@ -289,7 +289,7 @@ impl TimeSeriesProjection {
         block_size: u32,
         schema: &TimeSeriesSchema,
         readings: &[(i64, i64, f64)],
-    ) -> HexResult<PaxBlock> {
+    ) -> CenResult<PaxBlock> {
         let specs = schema.to_specs();
         let mut builder = PaxBlockBuilder::new(block_size, specs)?;
         for &(ts, sid, v) in readings {

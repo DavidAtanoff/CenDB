@@ -2,7 +2,7 @@
 //!
 //! These functions generate random byte arrays and strings, feed them
 //! to the decoders, and verify that no panics occur — only clean
-//! `HexError` returns.
+//! `CenError` returns.
 
 use cendb_storage::pax::PaxBlockReader;
 use cendb_storage::encoding::{
@@ -10,11 +10,11 @@ use cendb_storage::encoding::{
     EncodingCodec, FrameOfReferenceCodec, RawCodec, RunLengthCodec, gorilla_decode,
 };
 use cendb_cenql::parse as parse_cenql;
-use cendb_core::HexResult;
+use cendb_core::CenResult;
 
 /// Fuzz the PAX block reader with random bytes.
 /// Verifies that no panic occurs — only clean error returns.
-pub fn fuzz_pax_block(bytes: &[u8]) -> HexResult<()> {
+pub fn fuzz_pax_block(bytes: &[u8]) -> CenResult<()> {
     if bytes.len() < 64 {
         return Ok(()); // Too short for a header.
     }

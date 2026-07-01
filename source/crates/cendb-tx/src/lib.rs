@@ -28,13 +28,19 @@
 //!   3. **UNDO**: roll back losers using `prev_lsn` chains, writing CLRs
 //!      (compensation log records) so undo is itself crash-safe.
 //!
-//! For the prototype we implement a single-threaded, in-memory WAL with
+//! For this implementation we implement a single-threaded, in-memory WAL with
 //! synchronous fsync-on-commit; production would add group commit and
 //! `io_uring` batching.
 
+pub mod concurrent_stress;
+pub mod concurrent_tm;
+pub mod fuzz_extended;
 pub mod mvcc;
 pub mod wal;
 
+pub use concurrent_stress::{run_concurrent_stress, SharedState, StressReport, ThreadStats};
+pub use concurrent_tm::ConcurrentTransactionManager;
+pub use fuzz_extended::{fuzz_wal_record_decoder, run_extended_fuzz, CombinedFuzzReport};
 pub use mvcc::{
     IsolationLevel, MvccError, MvccResult, TimestampOracle, Transaction, TransactionManager,
     TransactionState, VersionHeader,

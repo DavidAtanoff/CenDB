@@ -115,8 +115,8 @@ pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 /// scans never straddle.
 pub const MINIPAGE_ALIGN: usize = 64;
 
-/// Magic bytes written at the head of every CenDB segment file. Note the
-/// rename from HexaDB: we keep an 8-byte ASCII tag that is unambiguous on disk.
+/// Magic bytes written at the head of every CenDB segment file. We keep an
+/// 8-byte ASCII tag that is unambiguous on disk.
 pub const SEGMENT_MAGIC: [u8; 8] = *b"CENDB001";
 
 /// Format version written into the segment header.
@@ -130,7 +130,7 @@ pub const FORMAT_VERSION: u16 = 1;
 /// are stable across releases: never renumber existing variants.
 #[repr(i32)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum HexStatus {
+pub enum CenStatus {
     Ok = 0,
     ErrNotFound = 1,
     ErrConstraint = 2,
@@ -141,69 +141,69 @@ pub enum HexStatus {
     ErrInternal = 99,
 }
 
-impl HexStatus {
+impl CenStatus {
     #[inline]
     pub fn is_ok(self) -> bool {
-        matches!(self, HexStatus::Ok)
+        matches!(self, CenStatus::Ok)
     }
 }
 
 /// Owned error type used inside Rust code. Cheap to construct (no allocation
-/// for the common static-message case) and convertible to `(HexStatus, &str)`
+/// for the common static-message case) and convertible to `(CenStatus, &str)`
 /// at the FFI boundary.
 #[derive(Debug)]
-pub struct HexError {
-    pub status: HexStatus,
+pub struct CenError {
+    pub status: CenStatus,
     pub message: String,
 }
 
-impl HexError {
+impl CenError {
     #[inline]
-    pub fn new(status: HexStatus, msg: impl Into<String>) -> Self {
+    pub fn new(status: CenStatus, msg: impl Into<String>) -> Self {
         Self { status, message: msg.into() }
     }
 
     #[inline]
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self::new(HexStatus::ErrNotFound, msg)
+        Self::new(CenStatus::ErrNotFound, msg)
     }
 
     #[inline]
     pub fn io(msg: impl Into<String>) -> Self {
-        Self::new(HexStatus::ErrIo, msg)
+        Self::new(CenStatus::ErrIo, msg)
     }
 
     #[inline]
     pub fn corrupt(msg: impl Into<String>) -> Self {
-        Self::new(HexStatus::ErrCorrupt, msg)
+        Self::new(CenStatus::ErrCorrupt, msg)
     }
 
     #[inline]
     pub fn constraint(msg: impl Into<String>) -> Self {
-        Self::new(HexStatus::ErrConstraint, msg)
+        Self::new(CenStatus::ErrConstraint, msg)
     }
 
     #[inline]
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self::new(HexStatus::ErrInternal, msg)
+        Self::new(CenStatus::ErrInternal, msg)
     }
 }
 
-impl fmt::Display for HexError {
+impl fmt::Display for CenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}: {}", self.status, self.message)
     }
 }
 
-impl std::error::Error for HexError {}
+impl std::error::Error for CenError {}
 
-impl From<std::io::Error> for HexError {
+impl From<std::io::Error> for CenError {
     fn from(e: std::io::Error) -> Self {
-        Self::new(HexStatus::ErrIo, e.to_string())
+        Self::new(CenStatus::ErrIo, e.to_string())
     }
 }
 
-pub type HexResult<T> = core::result::Result<T, HexError>;
+pub type CenResult<T> = core::result::Result<T, CenError>;
 
 // ============================================================================
 // Configuration record. POD so it can be embedded in a C struct via the FFI
@@ -211,7 +211,46 @@ pub type HexResult<T> = core::result::Result<T, HexError>;
 // ============================================================================
 
 /// Runtime configuration for a CenDB instance. Plain-old-data so it can be
-/// constructed from C via a parallel `HexConfig` struct.
+/// constructed from C via a parallel `CenConfig` struct.
+
+/// Storage mode for the buffer pool. Used as `u8` in `CenDbConfig` for
+/// C-ABI compatibility (`Pod`/`Zeroable`).
+pub const STORAGE_MODE_BUFFERED: u8 = 0;
+pub const STORAGE_MODE_MMAP: u8 = 1;
+pub const STORAGE_MODE_HYBRID: u8 = 2;
+
+/// Rust-friendly storage mode enum.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StorageMode {
+    /// Standard user-space buffer pool with LRU-K eviction.
+    Buffered,
+    /// mmap-backed read-only mode. Zero-copy reads from OS page cache.
+    Mmap,
+    /// Hybrid: mmap for reads, write-through for durability.
+    Hybrid,
+}
+
+impl StorageMode {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => StorageMode::Mmap,
+            2 => StorageMode::Hybrid,
+            _ => StorageMode::Buffered,
+        }
+    }
+    pub fn to_u8(self) -> u8 {
+        match self {
+            StorageMode::Buffered => 0,
+            StorageMode::Mmap => 1,
+            StorageMode::Hybrid => 2,
+        }
+    }
+}
+
+impl Default for StorageMode {
+    fn default() -> Self { StorageMode::Buffered }
+}
+
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct CenDbConfig {
@@ -228,6 +267,15 @@ pub struct CenDbConfig {
     pub group_commit_ms: u32,
     /// Bitfield of feature flags. Reserved for future use; currently ignored.
     pub flags: u64,
+    /// Storage mode: 0=Buffered (default), 1=Mmap, 2=Hybrid.
+    pub storage_mode: u8,
+    /// If 1, use io_uring for async I/O on Linux (no-op on other platforms).
+    pub use_io_uring: u8,
+    /// If 1, enable JIT compilation for hot query paths.
+    pub use_jit: u8,
+    /// Padding to ensure the struct is a multiple of 8 bytes (required by
+    /// Pod/Zeroable). Must be zero-initialized.
+    pub _pad: [u8; 5],
 }
 
 impl Default for CenDbConfig {
@@ -238,6 +286,10 @@ impl Default for CenDbConfig {
             pool_frames: 1024,
             group_commit_ms: 10,
             flags: 0,
+            storage_mode: STORAGE_MODE_BUFFERED,
+            use_io_uring: 0,
+            use_jit: 0,
+            _pad: [0; 5],
         }
     }
 }
@@ -245,21 +297,21 @@ impl Default for CenDbConfig {
 impl CenDbConfig {
     /// Sanity-check a config. We refuse obviously broken values up-front so
     /// the rest of the engine can rely on its invariants.
-    pub fn validate(&self) -> HexResult<()> {
+    pub fn validate(&self) -> CenResult<()> {
         if self.page_size < 4096 || !self.page_size.is_power_of_two() {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "page_size {} must be a power of two >= 4096",
                 self.page_size
             )));
         }
         if self.block_size < self.page_size || self.block_size % self.page_size != 0 {
-            return Err(HexError::constraint(format!(
+            return Err(CenError::constraint(format!(
                 "block_size {} must be a multiple of page_size {}",
                 self.block_size, self.page_size
             )));
         }
         if self.pool_frames == 0 {
-            return Err(HexError::constraint("pool_frames must be > 0"));
+            return Err(CenError::constraint("pool_frames must be > 0"));
         }
         Ok(())
     }
@@ -325,7 +377,12 @@ impl ValueKind {
 
 /// A scalar value with its kind tag. Used at the API boundary; the storage
 /// layer never materialises a `Value` per row on the hot path.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` is derived for structural equality (useful in tests and at
+/// API boundaries). Note: this is *not* SQL NULL semantics — `Null ==
+/// Null` is `true` under structural equality. Join/optimizer code that
+/// needs SQL NULL semantics must use an explicit `value_eq` helper.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
     Bool(bool),

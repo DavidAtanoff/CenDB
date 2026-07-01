@@ -1,0 +1,11 @@
+[package]
+name = "cendb-rdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RDF triple store with SPARQL query support for CenDB"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-storage = { path = "../cendb-storage" }

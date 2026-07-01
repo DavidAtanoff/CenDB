@@ -1,0 +1,84 @@
+CenDB License ("Atanoff License v1.0")
+
+Copyright (c) 2024-2026 David Atanoff. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+1. **Personal Use.** Personal, non-commercial use of the Software is
+   permitted worldwide, without restriction, including but not limited
+   to study, experimentation, modification, and distribution of
+   modifications to the Software for personal or educational purposes.
+
+2. **Commercial Use Restricted.** Commercial use of the Software is
+   permitted ONLY within the territory of the United States of America
+   and its territories. "Commercial use" means any use of the Software
+   intended for or directed toward commercial advantage or monetary
+   compensation, including but not limited to:
+     (a) use in a product or service that is sold, licensed, or
+         otherwise distributed for a fee;
+     (b) use internally within a business to generate revenue or
+         reduce costs;
+     (c) use by a business in providing services to its customers;
+     (d) use in a SaaS, cloud, or hosted offering.
+   Commercial use outside the United States is strictly prohibited
+   without prior written permission from the copyright holder.
+
+3. **Attribution Required for Commercial Use.** Any commercial use of
+   the Software, in whole or in part, must include clear and prominent
+   attribution to "David Atanoff" in:
+     (a) the "About", "Credits", or equivalent section of any user-
+         facing application that incorporates the Software;
+     (b) the documentation, README, or equivalent file of any
+         distribution of the Software or a derivative work; and
+     (c) the source code header of any file containing substantial
+         portions of the Software.
+   The attribution must be of the form: "Powered by CenDB, (c) David
+   Atanoff" and must be at least as prominent as other similar
+   attributions in the same context.
+
+4. **Redistribution and Sublicensing.** Redistribution of the Software,
+   with or without modification, is permitted provided that:
+     (a) the above copyright notice and this license are included in
+         all copies or substantial portions of the Software;
+     (b) recipients of the Software are bound by the terms of this
+         license, including the commercial-use territorial restriction
+         in Section 2 and the attribution requirement in Section 3;
+     (c) sublicensees may not relax the terms of this license.
+
+5. **No Warranty.** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+   WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+   TITLE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+   COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+   OR OTHER DEALINGS IN THE SOFTWARE.
+
+6. **Limitation of Liability.** IN NO EVENT SHALL DAVID ATANOFF OR ANY
+   CONTRIBUTORS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+   OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+   DAMAGE.
+
+7. **Termination.** This license terminates automatically if you
+   violate any of its terms. Upon termination you must cease all use
+   and distribution of the Software and destroy all copies in your
+   possession or control.
+
+8. **Governing Law.** This license shall be governed by and construed
+   in accordance with the laws of the State of Delaware, United States
+   of America, without regard to its conflict-of-law provisions.
+
+For inquiries regarding commercial licensing outside the United States
+or other permissions not granted by this license, contact the copyright
+holder at the repository's issue tracker: https://github.com/DavidAtanoff/CenDB

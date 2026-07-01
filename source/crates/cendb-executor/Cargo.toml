@@ -8,4 +8,5 @@ description = "CenDB vectorized execution engine: SIMD-accelerated filters, mors
 
 [dependencies]
 cendb-core = { path = "../cendb-core" }
+cendb-cenql = { path = "../cendb-cenql" }
 cendb-storage = { path = "../cendb-storage" }

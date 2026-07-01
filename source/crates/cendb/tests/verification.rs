@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use cendb_core::{NodeId, SegmentId, Value, ValueKind};
 use cendb_projection::{
-    DocValue, GraphProjection, HexDocBuilder, KvStore, RelationalTable, TimeSeriesSchema,
+    DocValue, GraphProjection, CenDocBuilder, KvStore, RelationalTable, TimeSeriesSchema,
     TimeSeriesStore,
 };
 use cendb_storage::header::ColumnSpec;
@@ -79,7 +79,7 @@ fn gen_document_5k_profiles() {
     let mut total_bytes: usize = 0;
     for i in 0..DOCUMENT_COUNT {
         let doc = make_doc(i);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
         total_bytes += bytes.len();
     }
     let elapsed = start.elapsed();
@@ -283,8 +283,8 @@ fn verify_document_shredded_nested_field() {
         ("active".to_string(), DocValue::Bool(true)),
     ]);
 
-    let bytes = HexDocBuilder::encode(&doc).unwrap();
-    let reader = cendb_projection::HexDoc::new(&bytes).unwrap();
+    let bytes = CenDocBuilder::encode(&doc).unwrap();
+    let reader = cendb_projection::CenDoc::new(&bytes).unwrap();
 
     // Shredded access: walk the offset table to find user.address.city.
     let city = reader.get_path("user.address.city").unwrap().unwrap();
@@ -355,15 +355,15 @@ fn perf_compression_ratio_across_models() {
         kv_store.block_count()
     );
 
-    // Document: report bytes-per-doc for HexDoc encoding.
+    // Document: report bytes-per-doc for CenDoc encoding.
     let mut doc_total_bytes: usize = 0;
     for i in 0..1000 {
         let doc = make_doc(i);
-        let bytes = HexDocBuilder::encode(&doc).unwrap();
+        let bytes = CenDocBuilder::encode(&doc).unwrap();
         doc_total_bytes += bytes.len();
     }
     println!(
-        "[perf_compression_ratio] Document: {} bytes/doc avg (HexDoc-encoded)",
+        "[perf_compression_ratio] Document: {} bytes/doc avg (CenDoc-encoded)",
         doc_total_bytes / 1000
     );
 }
