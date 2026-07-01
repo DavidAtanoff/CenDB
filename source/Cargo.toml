@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cendb-core",
+    "crates/cendb-storage",
+    "crates/cendb-buffer",
+    "crates/cendb-projection",
+    "crates/cendb-index",
+    "crates/cendb-tx",
+    "crates/cendb-cenql",
+    "crates/cendb-cas",
+    "crates/cendb-optimizer",
+    "crates/cendb-executor",
+    "crates/cendb-chaos",
+    "crates/cendb-ingest",
+    "crates/cendb-security",
+    "crates/cendb-pitr",
+    "crates/cendb-vector",
+    "crates/cendb-export",
+    "crates/cendb-jit",
+    "crates/cendb-replication",
+    "crates/cendb-search",
+    "crates/cendb-spatial",
+    "crates/cendb-system",
+    "crates/cendb-net",
+    "crates/cendb-ffi",
+    "crates/cendb",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["CenDB Contributors"]
+description = "CenDB — enterprise-grade multi-model embedded database engine"
+repository = "https://example.com/cendb"
+
+[workspace.dependencies]
+bytemuck = { version = "1.16", features = ["derive", "min_const_generics"] }
+memmap2 = "0.9"
+blake3 = "1.5"
+zstd = "0.13"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.minimal]
+inherits = "release"
+opt-level = "z"

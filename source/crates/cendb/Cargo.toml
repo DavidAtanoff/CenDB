@@ -1,0 +1,69 @@
+[package]
+name = "cendb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB facade crate — unified multi-model embedded database"
+
+[features]
+default = ["kv", "relational", "document", "timeseries", "graph", "ffi", "index", "tx", "cenql", "cas", "optimizer", "executor", "ingest", "security", "pitr", "vector", "export", "jit", "replication"]
+kv = ["dep:cendb-projection"]
+relational = ["dep:cendb-projection"]
+document = ["dep:cendb-projection"]
+timeseries = ["dep:cendb-projection"]
+graph = ["dep:cendb-projection"]
+ffi = ["dep:cendb-ffi"]
+index = ["dep:cendb-index"]
+tx = ["dep:cendb-tx"]
+cenql = ["dep:cendb-cenql"]
+cas = ["dep:cendb-cas"]
+optimizer = ["dep:cendb-optimizer"]
+executor = ["dep:cendb-executor"]
+ingest = ["dep:cendb-ingest"]
+security = ["dep:cendb-security"]
+pitr = ["dep:cendb-pitr"]
+vector = ["dep:cendb-vector"]
+export = ["dep:cendb-export"]
+jit = ["dep:cendb-jit"]
+replication = ["dep:cendb-replication"]
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-storage = { path = "../cendb-storage" }
+cendb-buffer = { path = "../cendb-buffer" }
+cendb-projection = { path = "../cendb-projection", optional = true }
+cendb-ffi = { path = "../cendb-ffi", optional = true }
+cendb-index = { path = "../cendb-index", optional = true }
+cendb-tx = { path = "../cendb-tx", optional = true }
+cendb-cenql = { path = "../cendb-cenql", optional = true }
+cendb-cas = { path = "../cendb-cas", optional = true }
+cendb-optimizer = { path = "../cendb-optimizer", optional = true }
+cendb-executor = { path = "../cendb-executor", optional = true }
+cendb-ingest = { path = "../cendb-ingest", optional = true }
+cendb-security = { path = "../cendb-security", optional = true }
+cendb-pitr = { path = "../cendb-pitr", optional = true }
+cendb-vector = { path = "../cendb-vector", optional = true }
+cendb-export = { path = "../cendb-export", optional = true }
+cendb-jit = { path = "../cendb-jit", optional = true }
+cendb-replication = { path = "../cendb-replication", optional = true }
+
+[dev-dependencies]
+cendb-projection = { path = "../cendb-projection" }
+cendb-ffi = { path = "../cendb-ffi" }
+cendb-buffer = { path = "../cendb-buffer" }
+cendb-index = { path = "../cendb-index" }
+cendb-tx = { path = "../cendb-tx" }
+cendb-cenql = { path = "../cendb-cenql" }
+cendb-cas = { path = "../cendb-cas" }
+cendb-optimizer = { path = "../cendb-optimizer" }
+cendb-executor = { path = "../cendb-executor" }
+cendb-chaos = { path = "../cendb-chaos" }
+cendb-ingest = { path = "../cendb-ingest" }
+cendb-security = { path = "../cendb-security" }
+cendb-pitr = { path = "../cendb-pitr" }
+cendb-vector = { path = "../cendb-vector" }
+cendb-export = { path = "../cendb-export" }
+cendb-jit = { path = "../cendb-jit" }
+cendb-replication = { path = "../cendb-replication" }
+tempfile = "3"

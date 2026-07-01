@@ -1,0 +1,12 @@
+[package]
+name = "cendb-optimizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB cost-based query optimizer: statistics, join reordering, join method selection"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-cenql = { path = "../cendb-cenql" }
+blake3.workspace = true

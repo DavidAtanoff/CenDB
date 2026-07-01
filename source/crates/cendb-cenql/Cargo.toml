@@ -1,0 +1,10 @@
+[package]
+name = "cendb-cenql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenQL: pipeline-oriented multi-model query language for CenDB"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }

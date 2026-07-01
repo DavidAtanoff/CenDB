@@ -1,0 +1,10 @@
+[package]
+name = "cendb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB core types: PageId, BlockId, errors, config"
+
+[dependencies]
+bytemuck.workspace = true

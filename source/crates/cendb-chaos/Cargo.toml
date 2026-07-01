@@ -1,0 +1,13 @@
+[package]
+name = "cendb-chaos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB chaos testing: fault injection VFS, crash recovery simulator, fuzzing harness"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-storage = { path = "../cendb-storage" }
+cendb-tx = { path = "../cendb-tx" }
+cendb-cenql = { path = "../cendb-cenql" }

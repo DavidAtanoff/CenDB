@@ -1,0 +1,14 @@
+[package]
+name = "cendb-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB unified storage: PAX page format, segment & block layouts"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+bytemuck.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

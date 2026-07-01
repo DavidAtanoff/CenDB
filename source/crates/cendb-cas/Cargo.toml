@@ -1,0 +1,16 @@
+[package]
+name = "cendb-cas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB Content-Addressable Storage: BLAKE3 hashing, deduplication, blob store"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-index = { path = "../cendb-index" }
+blake3.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

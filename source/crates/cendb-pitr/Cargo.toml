@@ -1,0 +1,10 @@
+[package]
+name = "cendb-pitr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-tx = { path = "../cendb-tx" }

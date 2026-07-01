@@ -1,0 +1,15 @@
+[package]
+name = "cendb-projection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB multi-model projections: KV, relational, document, time-series, graph"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-storage = { path = "../cendb-storage" }
+
+[dev-dependencies]
+tempfile = "3"
+cendb-buffer = { path = "../cendb-buffer" }

@@ -1,0 +1,100 @@
+{
+  "scopeName": "source.cenql",
+  "patterns": [
+    { "include": "#keywords" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#comments" },
+    { "include": "#operators" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cenql",
+          "match": "\\b(from|filter|select|sort|take|join|on|group_by|window|match|return|distinct|last)\\b"
+        },
+        {
+          "name": "keyword.operator.cenql",
+          "match": "\\b(asc|desc|inner|left|right|full|tumbling|hopping|session|and|or|not)\\b"
+        },
+        {
+          "name": "support.function.cenql",
+          "match": "\\b(sum|count|mean|max|min|percentile|count_distinct|path_length)\\b"
+        },
+        {
+          "name": "constant.language.cenql",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.cenql",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.cenql",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.cenql",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.duration.cenql",
+          "match": "\\b\\d+[mhsd]\\b"
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-dash.cenql",
+          "match": "--.*$"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipe.cenql",
+          "match": "\\|"
+        },
+        {
+          "name": "keyword.operator.comparison.cenql",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arrow.cenql",
+          "match": "->|<-"
+        },
+        {
+          "name": "keyword.operator.arithmetic.cenql",
+          "match": "[+\\-*/]"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "entity.name.type.cenql",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.cenql",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

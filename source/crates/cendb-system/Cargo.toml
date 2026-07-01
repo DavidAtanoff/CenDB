@@ -1,0 +1,15 @@
+[package]
+name = "cendb-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-buffer = { path = "../cendb-buffer" }
+cendb-tx = { path = "../cendb-tx" }
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

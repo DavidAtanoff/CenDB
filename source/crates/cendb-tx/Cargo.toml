@@ -1,0 +1,16 @@
+[package]
+name = "cendb-tx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CenDB transactions: MVCC + WAL + ARIES-lite recovery"
+
+[dependencies]
+cendb-core = { path = "../cendb-core" }
+cendb-storage = { path = "../cendb-storage" }
+cendb-index = { path = "../cendb-index" }
+bytemuck.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
