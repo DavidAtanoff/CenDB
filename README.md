@@ -21,8 +21,7 @@ substrate, many logical lenses**.
 
 ## Highlights
 
-- **9 data models, 1 substrate** — 7 fully supported, 2 partially, 1 gap
-  documented.
+- **9 data models, 1 substrate** — 9 data models fully implemented.
 - **Corporate-grade security** — XChaCha20-Poly1305 page encryption,
   Argon2id key derivation, RBAC, tamper-evident audit logging.
 - **Crash-tested** — 500+ on-disk crash iterations, 50K+ fuzz iterations,
